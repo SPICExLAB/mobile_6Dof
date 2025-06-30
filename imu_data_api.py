@@ -40,7 +40,7 @@ class IMUDataAPI:
         """Connect to the running IMU receiver API server"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.settimeout(2.0)  # 2 second timeout
+            self.socket.settimeout(10.0)  # 10 second timeout
             
             # Test connection
             response = self._send_request("ping")

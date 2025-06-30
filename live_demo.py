@@ -318,7 +318,13 @@ if __name__ == '__main__':
     # Setup Unity server for visualization
     if args.vis:
         server_for_unity = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_for_unity.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        # Fix for Windows which doesn't have SO_REUSEPORT
+        if hasattr(socket, 'SO_REUSEPORT'):
+            server_for_unity.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        else:
+            # On Windows, use SO_REUSEADDR instead
+            server_for_unity.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
         server_for_unity.bind(('0.0.0.0', 8889))
         server_for_unity.listen(1)
         print('Server start. Waiting for unity3d to connect.')

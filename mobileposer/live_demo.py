@@ -241,6 +241,7 @@ if __name__ == '__main__':
         glb_ori = smpl2imu.matmul(ori_raw).matmul(device2bone)
 
         # normalization 
+        # [0, 1, 2, 3, 4] 
         _acc = glb_acc.view(-1, 5, 3)[:, [1, 4, 3, 0, 2]] / amass.acc_scale
         _ori = glb_ori.view(-1, 5, 3, 3)[:, [1, 4, 3, 0, 2]]
         acc = torch.zeros_like(_acc)

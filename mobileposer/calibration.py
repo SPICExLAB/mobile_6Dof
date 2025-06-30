@@ -119,69 +119,6 @@ class DataReceiver:
         return self.data_queue.get_nowait() if not self.data_queue.empty() else None
 
 
-def parse_ios_device_data(data, addr, receive_time):
-    """Parse iOS device data extracting device type from message content"""
-    try:
-        # Decode the data
-        if isinstance(data, bytes):
-            message = data.decode('utf-8').strip()
-        else:
-            message = str(data).strip()
-        
-        # Handle system messages
-        if message in ["client_initialized", "client_disconnected"]:
-            return None
-        
-        # Extract device type from "ios-device;DEVICE_TYPE:data" format
-        if ';' in message and ':' in message:
-            parts = message.split(';', 1)
-            if len(parts) == 2:
-                second_part = parts[1]
-                if ':' in second_part:
-                    device_type, sensor_data_str = second_part.split(':', 1)
-                    return parse_sensor_data(sensor_data_str, device_type, receive_time)
-        
-        # Fallback
-        return parse_sensor_data(message, 'phone', receive_time)
-        
-    except Exception as e:
-        return None
-
-
-def parse_sensor_data(data_str, device_name, receive_time):
-    """Parse sensor data string into required format with device-specific handling"""
-    try:
-        parts = data_str.split()
-        
-        if len(parts) < 9:
-            return None
-        
-        # Parse common data: timestamp deviceTimestamp accX accY accZ quatX quatY quatZ quatW
-        timestamp = float(parts[0])
-        device_timestamp = float(parts[1]) if len(parts) > 1 else timestamp
-        
-        # Parse acceleration (m/s²)
-        acc_x = float(parts[2])
-        acc_y = float(parts[3]) 
-        acc_z = float(parts[4])
-        curr_acc = np.array([acc_x, acc_y, acc_z])
-        
-        # Parse quaternion (x, y, z, w)
-        quat_x = float(parts[5])
-        quat_y = float(parts[6])
-        quat_z = float(parts[7])
-        quat_w = float(parts[8])
-        curr_ori = np.array([quat_x, quat_y, quat_z, quat_w])
-        
-        timestamps = [timestamp, device_timestamp]
-        vis_str = f"{device_name}: acc=({acc_x:.2f},{acc_y:.2f},{acc_z:.2f}) quat=({quat_x:.2f},{quat_y:.2f},{quat_z:.2f},{quat_w:.2f})"
-        
-        return vis_str, device_name, curr_acc, curr_ori, timestamps
-        
-    except (ValueError, IndexError) as e:
-        return None
-
-
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--log", action='store_true')
@@ -217,6 +154,8 @@ if __name__ == "__main__":
         if not continue_running:
             break
 
+        device_id = None  # Initialize device_id to avoid NameError
+        
         try:
             # Receive packet from server 
             data_packet = data_receiver.get_data()
@@ -224,23 +163,14 @@ if __name__ == "__main__":
                 continue
             data, addr, receive_time = data_packet
 
-            # Parse iOS device data format
-            parsed_data = parse_ios_device_data(data, addr, receive_time)
+            # Use the updated process_data function from sensor_utils (only takes 1 argument)
+            parsed_data = process_data(data)
             if parsed_data is None:
                 continue
                 
             vis_str, device_id, curr_acc, curr_ori, timestamps = parsed_data
             
-            # Convert device names to numeric IDs for compatibility with existing code
-            if isinstance(device_id, str):
-                device_mapping = {
-                    'phone': 0,
-                    'headphone': 1, 
-                    'watch': 2,
-                    'glasses': 3
-                }
-                numeric_device_id = device_mapping.get(device_id, 0)
-                device_id = numeric_device_id
+            # device_id is already numeric from process_data function
             
             # Only show performance info for device 0
             if device_id == 0:
@@ -274,8 +204,11 @@ if __name__ == "__main__":
                 prev_timestamp = curr_timestamp
 
         except Exception as e:
-            if device_id == 0:  # Only log errors for device 0
+            # Now device_id is safely defined (either from parsing or initialized as None)
+            if device_id == 0:  
                 print(f"Error processing device 0: {e}")
+            else:
+                print(f"Error processing data: {e}")
         except KeyboardInterrupt:
             data_receiver.stop()
             break
