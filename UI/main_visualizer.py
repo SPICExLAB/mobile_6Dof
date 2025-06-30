@@ -1,4 +1,4 @@
-"""Main IMU Visualizer - Enhanced with Reference Device Selection"""
+"""Main IMU Visualizer - Enhanced with Reference Device Selection and Reset Button"""
 
 import pygame
 import numpy as np
@@ -12,6 +12,7 @@ from .components.device_panel import DevicePanel
 from .components.waveform_panel import WaveformPanel
 from .components.reference_panel import ReferencePanel
 from .components.calibration_button import CalibrationButton
+from .components.reset_button import ResetButton  # Import the new reset button
 from .layouts.device_grid import DeviceGridLayout
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,10 @@ class IMUVisualizer:
         
         # Device data storage
         self.device_data = {}
+        # Keep track of active devices for waveform cleanup
+        self.active_devices = set()
+        # Last cleanup time
+        self.last_cleanup_time = time.time()
         
         # Reference device for calibration
         self.reference_device = None
@@ -70,14 +75,23 @@ class IMUVisualizer:
         # Device grid layout manager (updated for AR glasses)
         self.device_layout = DeviceGridLayout(box_size=180, margin=20)
         
-        # Calibration button (bottom of left panel)
+        # Calibration button (bottom left of left panel)
         button_width = 180
-        button_x = (self.left_panel_width - button_width) // 2 + 10
+        button_x = 50  # Moved left to make room for reset button
         button_y = self.height - 80
         self.calibration_button = CalibrationButton(
             self.screen, 
             button_x, 
             button_y
+        )
+        
+        # Reset button (bottom right of left panel)
+        reset_button_x = self.left_panel_width - 230  # Position to the right of calibration button
+        reset_button_y = self.height - 80
+        self.reset_button = ResetButton(
+            self.screen,
+            reset_button_x,
+            reset_button_y
         )
         
         # Waveform panel (right side)
@@ -95,6 +109,9 @@ class IMUVisualizer:
     def update_device_data(self, imu_data, is_calibrated: bool):
         """Update device data for visualization"""
         device_id = imu_data.device_id
+        
+        # Track active devices
+        self.active_devices.add(device_id)
         
         if device_id not in self.device_data:
             self.device_data[device_id] = {
@@ -126,7 +143,7 @@ class IMUVisualizer:
         data['log_counter'] = (data['log_counter'] + 1) % 120
         if data['log_counter'] == 0:
             try:
-                euler = calculate_euler_from_quaternion(imu_data.quaternion)
+                euler = imu_data.euler if imu_data.euler is not None else [0, 0, 0]
                 status = "CALIBRATED" if is_calibrated else "UNCALIBRATED"
                 is_ref = "REFERENCE" if device_id == self.reference_device else ""
                 logger.debug(f"PERIODIC {status} {is_ref}: {device_id} orientation: "
@@ -142,6 +159,34 @@ class IMUVisualizer:
             if time_diff > 0:
                 data['frequency'] = 30.0 / time_diff
                 data['frequency_timer'] = current_time
+        
+        # Check and cleanup inactive devices periodically
+        current_time = time.time()
+        if current_time - self.last_cleanup_time > 1.0:  # Check every second
+            self._cleanup_inactive_devices()
+            self.last_cleanup_time = current_time
+    
+    def _cleanup_inactive_devices(self):
+        """Remove inactive devices from active list and cleanup waveform panel"""
+        current_time = time.time()
+        inactive_devices = set()
+        
+        for device_id in self.active_devices:
+            if device_id in self.device_data:
+                # Consider device inactive if no data for 2 seconds
+                if current_time - self.device_data[device_id]['last_update'] > 2.0:
+                    inactive_devices.add(device_id)
+                    logger.info(f"Device {device_id} became inactive")
+        
+        # Remove inactive devices from active set
+        self.active_devices -= inactive_devices
+        
+        # Clean up waveform panel
+        for device_id in inactive_devices:
+            # If waveform component exists, set it to collapsed
+            if hasattr(self.waveform_panel, 'device_waveforms') and device_id in self.waveform_panel.device_waveforms:
+                # Set to collapsed so it will be hidden
+                self.waveform_panel.device_waveforms[device_id].is_collapsed = True
     
     def get_active_devices(self):
         """Get list of currently active devices"""
@@ -184,6 +229,19 @@ class IMUVisualizer:
             return True
         return False
     
+    def reset_calibration(self):
+        """Reset all calibration settings"""
+        # Clear reference device
+        self.reference_device = None
+        self.selected_reference_device = None
+        
+        # Mark all devices as uncalibrated
+        for device_id in self.device_data:
+            self.device_data[device_id]['is_calibrated'] = False
+        
+        logger.info("Calibration reset: all devices marked as uncalibrated, reference cleared")
+        return "reset_calibration"
+    
     def _update_device_panels(self):
         """Update device panels based on active devices"""
         # Always create panels for all possible devices
@@ -217,6 +275,7 @@ class IMUVisualizer:
         """Handle pygame events and return action"""
         mouse_pos = pygame.mouse.get_pos()
         self.calibration_button.update(mouse_pos)
+        self.reset_button.update(mouse_pos)  # Update reset button hover state
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -225,6 +284,10 @@ class IMUVisualizer:
                 # Check calibration button
                 if self.calibration_button.is_clicked(event):
                     return "calibrate"
+                
+                # Check reset button
+                if self.reset_button.is_clicked(event):
+                    return self.reset_calibration()
                 
                 # Check device panel clicks
                 for device_name, device_panel in self.device_panels.items():
@@ -280,6 +343,9 @@ class IMUVisualizer:
         
         # Draw calibration button
         self.calibration_button.draw()
+        
+        # Draw reset button
+        self.reset_button.draw()
         
         # Draw waveform panel
         self.waveform_panel.draw(self.device_data)

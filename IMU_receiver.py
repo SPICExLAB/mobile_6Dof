@@ -6,7 +6,9 @@ Key improvements:
 - Enhanced modular design with separate calibration and parsing modules
 - Improved coordinate transformations for all device types
 - Support for reference device selection
-- Pre-transformation of headphones and AR glasses to global frame
+- Added reset functionality for calibration
+- Improved gyroscope data handling
+- Dynamic waveform cleanup for disconnected devices
 """
 
 import numpy as np
@@ -27,18 +29,20 @@ from Input_Utils.sensor_utils import (
     IMUData,
     
     # Transformation functions
-    apply_calibration_transform,
     apply_gravity_compensation,
     calculate_euler_from_quaternion,
-    apply_mobileposer_calibration,
     
     # Parsing functions
     parse_ios_data,
     parse_rokid_glasses_data
 )
 
-# Import calibration module
-from Input_Utils.sensor_calibrate import IMUCalibrator
+# Import calibration module and functions
+from Input_Utils.sensor_calibrate import (
+    IMUCalibrator,
+    apply_calibration_transform,
+    align_global_identity
+)
 
 logging.basicConfig(level=logging.INFO,
                               format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -59,6 +63,7 @@ class IMUReceiver:
         
         # Public calibration flag - can be set by external applications
         self.calibration_requested = False
+        self.reset_requested = False
         
         # Core components
         self.calibrator = IMUCalibrator()
@@ -75,6 +80,7 @@ class IMUReceiver:
                 'get_device_data': self._get_device_data,
                 'get_active_devices': self._get_active_devices,
                 'calibrate': self.request_calibration,
+                'reset_calibration': self.request_reset,
                 'select_reference_device': self._select_reference_device,
                 'calibrate_t_pose': self.calibrate_t_pose,
                 'get_t_pose_calibration': self.get_t_pose_calibration 
@@ -87,6 +93,7 @@ class IMUReceiver:
         logger.info(f"Enhanced IMU Receiver initialized with reference device selection")
         logger.info(f"Data port: {data_port}, API port: {api_port}")
         logger.info("Headphones/AR Glasses pre-transformed to global frame for easier calibration")
+        logger.info("Gyroscope data now properly transformed to global frame")
     
     @classmethod
     def get_instance(cls):
@@ -98,6 +105,23 @@ class IMUReceiver:
         self.calibration_requested = True
         # Use the selected reference device from visualizer
         logger.info(f"Calibration requested")
+        return True
+    
+    def request_reset(self):
+        """Request reset of calibration settings"""
+        self.reset_requested = True
+        logger.info(f"Reset calibration requested")
+        return True
+    
+    def reset_calibration(self):
+        """Reset all calibration settings"""
+        # Reset calibrator
+        self.calibrator = IMUCalibrator()
+        
+        # Reset visualizer's reference device
+        self.visualizer.reset_calibration()
+        
+        logger.info("Calibration reset: all devices marked as uncalibrated, reference cleared")
         return True
     
     def _select_reference_device(self, device_id):
@@ -237,17 +261,24 @@ class IMUReceiver:
             
             # For all devices, use the pre-aligned data if available
             if aligned_data is not None:
-                aligned_quat, aligned_accel = aligned_data
+                # Check if aligned_data contains gyroscope
+                if len(aligned_data) == 3:
+                    aligned_quat, aligned_accel, aligned_gyro = aligned_data
+                else:
+                    aligned_quat, aligned_accel = aligned_data
+                    aligned_gyro = gyro  # Use original gyro if not transformed
                 
                 # Store original and aligned data
                 self.raw_device_data[device_id].update({
                     'aligned_quaternion': aligned_quat,
-                    'aligned_acceleration': aligned_accel
+                    'aligned_acceleration': aligned_accel,
+                    'aligned_gyroscope': aligned_gyro
                 })
                 
                 # Use aligned data for calibration and transformation
                 quat_for_calibration = aligned_quat
                 accel_for_processing = aligned_accel
+                gyro_for_processing = aligned_gyro
                 
                 # Store the aligned quaternion for calibration
                 self.current_orientations[device_id] = aligned_quat
@@ -255,6 +286,7 @@ class IMUReceiver:
                 # Fallback to original data if no alignment available
                 quat_for_calibration = device_quat
                 accel_for_processing = device_accel
+                gyro_for_processing = gyro
                 
                 # Store the original quaternion for calibration
                 self.current_orientations[device_id] = device_quat
@@ -276,18 +308,27 @@ class IMUReceiver:
             calibration_quats = self.calibrator.get_calibration_quaternions()
             reference_device = self.calibrator.reference_device
             if device_id in calibration_quats:
-                # Transform using calibration
-                global_quat, global_acc = apply_calibration_transform(
+                # Transform using calibration with gyroscope
+                result = apply_calibration_transform(
                     quat_for_calibration, 
                     accel_for_processing, 
                     calibration_quats, 
                     device_id,
-                    reference_device=reference_device
+                    reference_device=reference_device,
+                    gyro=gyro_for_processing
                 )
+                
+                # Check if the result includes gyroscope
+                if len(result) == 3:
+                    global_quat, global_acc, global_gyro = result
+                else:
+                    global_quat, global_acc = result
+                    global_gyro = gyro_for_processing  # Use processed gyro if not returned
             else:
                 # Not calibrated - use as is
                 global_quat = quat_for_calibration
                 global_acc = accel_for_processing
+                global_gyro = gyro_for_processing
             
             # Apply gravity compensation if enabled for glasses
             if self.visualizer.get_gravity_enabled() and device_id == 'glasses':
@@ -304,7 +345,7 @@ class IMUReceiver:
                 timestamp=timestamp,
                 device_id=device_id,
                 accelerometer=linear_accel,
-                gyroscope=gyro,
+                gyroscope=global_gyro,  # Now using global-frame gyroscope
                 quaternion=global_quat,
                 euler=euler_deg
             )
@@ -344,9 +385,8 @@ class IMUReceiver:
             except:
                 pass
         
-        # Apply calibration
-        from Input_Utils.sensor_utils import apply_mobileposer_calibration
-        calibration_quats, ref_device = apply_mobileposer_calibration(
+        # Apply calibration using global identity alignment
+        calibration_quats, ref_device = align_global_identity(
             self.current_orientations,
             reference_device
         )
@@ -383,12 +423,22 @@ class IMUReceiver:
                     # Attempt to log what would be displayed with this calibration
                     try:
                         # This will show what happens when we apply the calibration to current orientation
-                        global_quat, _ = apply_calibration_transform(
-                            quaternion, 
-                            np.zeros(3), 
-                            calibration_quats, 
-                            device_id
-                        )
+                        if device_id in self.raw_device_data and 'aligned_gyroscope' in self.raw_device_data[device_id]:
+                            global_quat, global_acc, _ = apply_calibration_transform(
+                                quaternion, 
+                                np.zeros(3), 
+                                calibration_quats, 
+                                device_id,
+                                gyro=self.raw_device_data[device_id]['aligned_gyroscope']
+                            )
+                        else:
+                            global_quat, global_acc = apply_calibration_transform(
+                                quaternion, 
+                                np.zeros(3), 
+                                calibration_quats, 
+                                device_id
+                            )
+                            
                         display_euler = calculate_euler_from_quaternion(global_quat)
                         logger.info(f"DISPLAY ORIENTATION: {device_id}: "
                                 f"Roll={display_euler[0]:.1f}°, Pitch={display_euler[1]:.1f}°, Yaw={display_euler[2]:.1f}°")
@@ -408,7 +458,7 @@ class IMUReceiver:
         device orientations during T-pose and calculates bone alignment
         
         Returns:
-            Tuple of (smpl2imu, device2bone, acc_offsets) if successful
+            Tuple of (smpl2imu, device2bone, acc_offsets, gyro_offsets) if successful
         """
         # Get the current reference device
         reference_device = self.calibrator.reference_device
@@ -428,6 +478,7 @@ class IMUReceiver:
         # Create accumulators
         accumulated_quaternions = {}
         accumulated_accelerations = {}
+        accumulated_gyroscopes = {}  # Add gyroscope accumulation
         sample_count = 0
         
         # Collection start time
@@ -450,23 +501,35 @@ class IMUReceiver:
                         if device_id not in accumulated_accelerations:
                             accumulated_accelerations[device_id] = []
                         accumulated_accelerations[device_id].append(accel)
+                    
+                    # Get gyroscope if available
+                    if device_id in self.raw_device_data and 'gyroscope' in self.raw_device_data[device_id]:
+                        gyro = self.raw_device_data[device_id]['gyroscope']
+                        if device_id not in accumulated_gyroscopes:
+                            accumulated_gyroscopes[device_id] = []
+                        accumulated_gyroscopes[device_id].append(gyro)
                         
             sample_count += 1
             time.sleep(0.01)  # 100 Hz collection
         
         logger.info(f"T-pose calibration: Collected {sample_count} samples for {len(accumulated_quaternions)} devices")
         
-        # Calculate mean orientations and accelerations
+        # Calculate mean orientations, accelerations, and gyroscopes
         device_orientations = {}
         device_accelerations = {}
+        device_gyroscopes = {}
+        
         for device_id, quats in accumulated_quaternions.items():
             device_orientations[device_id] = np.mean(np.array(quats), axis=0)
             
         for device_id, accels in accumulated_accelerations.items():
             device_accelerations[device_id] = np.mean(np.array(accels), axis=0)
         
+        for device_id, gyros in accumulated_gyroscopes.items():
+            device_gyroscopes[device_id] = np.mean(np.array(gyros), axis=0)
+        
         # Call calibrate_t_pose from the calibrator
-        result = self.calibrator.calibrate_t_pose(device_orientations, device_accelerations)
+        result = self.calibrator.calibrate_t_pose(device_orientations, device_accelerations, device_gyroscopes)
         
         return result
     
@@ -475,7 +538,7 @@ class IMUReceiver:
         Get the current T-pose calibration data
         
         Returns:
-            tuple: (smpl2imu, device2bone, acc_offsets) if T-pose calibration has been performed
+            tuple: (smpl2imu, device2bone, acc_offsets, gyro_offsets) if T-pose calibration has been performed
         """
         return self.calibrator.get_t_pose_calibration()
 
@@ -506,6 +569,8 @@ class IMUReceiver:
                     self.running = False
                 elif event == "calibrate":
                     self.calibrate_all_devices()
+                elif event == "reset_calibration":
+                    self.reset_calibration()
                 elif event and event.startswith("select_reference:"):
                     # Handle reference device selection
                     device_id = event.split(":", 1)[1]
@@ -515,6 +580,11 @@ class IMUReceiver:
                 if self.calibration_requested:
                     self.calibrate_all_devices()
                     self.calibration_requested = False
+                
+                # Check for external reset request
+                if self.reset_requested:
+                    self.reset_calibration()
+                    self.reset_requested = False
                 
                 # Process incoming data
                 self.process_data()
@@ -545,6 +615,7 @@ def main():
     print("  1. Select which device sets the reference frame")
     print("  2. Position the device vertically with screen facing you")
     print("  3. Calibrate all devices relative to this reference")
+    print("  4. Use RESET button to clear calibration and start over")
     print()
     print("External API: Available on port 9001")
     

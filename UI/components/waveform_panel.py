@@ -1,13 +1,14 @@
-"""Waveform panel component for IMU data visualization"""
+"""Waveform panel component for IMU data visualization with dynamic device handling"""
 
 import pygame
 import numpy as np
+import time
 from ..utils.colors import Colors
 from ..utils.fonts import FontManager
 from .device_waveform import DeviceWaveform
 
 class WaveformPanel:
-    """Displays IMU sensor waveforms"""
+    """Displays IMU sensor waveforms with dynamic device handling"""
     
     def __init__(self, screen, x, y, width, height):
         self.screen = screen
@@ -31,6 +32,9 @@ class WaveformPanel:
             ((-10.0, 10.0), (-8.0, 8.0))    # Very zoomed out
         ]
         self.default_zoom_index = 2
+        
+        # Keep track of last active devices to detect disconnections
+        self.last_active_devices = set()
     
     def change_zoom(self, device_name, direction):
         """Change zoom level for a device (-1 for zoom in, 1 for zoom out)"""
@@ -54,9 +58,27 @@ class WaveformPanel:
         
         # Get active devices
         active_devices = []
+        current_active_set = set()
+        
+        current_time = time.time()
         for device_name, data in device_data_dict.items():
-            if data and len(data.get('accel_history', [])) > 0:
+            # Consider a device active if it has data and was updated recently
+            if (data and 
+                len(data.get('accel_history', [])) > 0 and 
+                current_time - data.get('last_update', 0) < 2.0):
                 active_devices.append((device_name, data))
+                current_active_set.add(device_name)
+        
+        # Detect disconnected devices
+        disconnected = self.last_active_devices - current_active_set
+        for device_name in disconnected:
+            # Remove waveform for disconnected device
+            if device_name in self.device_waveforms:
+                # Mark as collapsed so it won't be shown
+                self.device_waveforms[device_name].is_collapsed = True
+        
+        # Update last active devices
+        self.last_active_devices = current_active_set
         
         if not active_devices:
             self._draw_no_data_message()
@@ -143,3 +165,14 @@ class WaveformPanel:
                     return ('zoom_out', device_name)
         
         return None
+        
+    def cleanup_inactive_device(self, device_id):
+        """Remove a device's waveform when it becomes inactive"""
+        if device_id in self.device_waveforms:
+            # Set to collapsed to hide it
+            self.device_waveforms[device_id].is_collapsed = True
+            # Remove from active devices
+            if device_id in self.last_active_devices:
+                self.last_active_devices.remove(device_id)
+            return True
+        return False
