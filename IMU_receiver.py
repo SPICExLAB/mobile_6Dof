@@ -383,24 +383,57 @@ class IMUReceiver:
         
         logger.info(f"T-pose calibration: Collected {sample_count} samples for {len(accumulated_quaternions)} devices")
         
-        # Calculate mean orientations, accelerations, and gyroscopes
+        # Calculate means
         device_orientations = {}
         device_accelerations = {}
         device_gyroscopes = {}
         
         for device_id, quats in accumulated_quaternions.items():
-            device_orientations[device_id] = np.mean(np.array(quats), axis=0)
+            mean_quat = np.mean(np.array(quats), axis=0)
+            # Normalize quaternion
+            mean_quat = mean_quat / np.linalg.norm(mean_quat)
+            device_orientations[device_id] = mean_quat
             
+            # Log the mean orientation for each device during T-pose
+            try:
+                euler = calculate_euler_from_quaternion(mean_quat)
+                logger.info(f"T-POSE MEAN: {device_id} orientation: "
+                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                logger.info(f"T-POSE MEAN: {device_id} quaternion: "
+                        f"[{mean_quat[0]:.3f}, {mean_quat[1]:.3f}, {mean_quat[2]:.3f}, {mean_quat[3]:.3f}]")
+            except Exception as e:
+                logger.warning(f"Error calculating Euler angles for {device_id}: {e}")
+        
         for device_id, accels in accumulated_accelerations.items():
             device_accelerations[device_id] = np.mean(np.array(accels), axis=0)
+            logger.info(f"T-POSE MEAN: {device_id} acceleration: {device_accelerations[device_id].tolist()}")
         
         for device_id, gyros in accumulated_gyroscopes.items():
             device_gyroscopes[device_id] = np.mean(np.array(gyros), axis=0)
+            logger.info(f"T-POSE MEAN: {device_id} gyroscope: {device_gyroscopes[device_id].tolist()}")
         
         # Call calibrate_t_pose from the calibrator
         result = self.calibrator.perform_tpose_alignment(device_orientations, device_accelerations, device_gyroscopes)
         
+        # Log the calculated parameters
+        if result:
+            smpl2imu, device2bone, acc_offsets, gyro_offsets = result
+            logger.info("T-pose calibration completed successfully with parameters:")
+            
+            # Log device2bone matrices in more detail
+            for device_id, matrix in device2bone.items():
+                logger.info(f"TPOSE RESULT: {device_id} device2bone computed")
+                # Log the matrix details for each device
+                try:
+                    logger.info(f"TPOSE RESULT: {device_id} device2bone matrix:")
+                    for row in range(matrix.shape[0]):
+                        row_values = [f"{val:.3f}" for val in matrix[row].tolist()]
+                        logger.info(f"    {' '.join(row_values)}")
+                except Exception as e:
+                    logger.warning(f"Error formatting device2bone matrix for {device_id}: {e}")
+        
         return result
+
 
     def _process_device_data(self, device_id, parsed_data, addr):
         """
@@ -480,7 +513,7 @@ class IMUReceiver:
             # Apply calibration transformation if device is calibrated
             global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
             device_calibrated = device_id in self.calibrator.calibrated_devices
-            
+
             if global_alignment_complete and device_calibrated:
                 # Apply global transformation with gyroscope
                 if gyro_for_processing is not None:
@@ -497,13 +530,26 @@ class IMUReceiver:
                         accel_for_processing
                     )
                     global_gyro = gyro_for_processing  # Use processed gyro if not returned
-                    
+                
+                # Log global transformation result
+                euler = calculate_euler_from_quaternion(global_quat)
+                logger.debug(f"GLOBAL TRANSFORM: {device_id} orientation: "
+                            f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                
                 # If T-pose calibration is complete, apply that transformation too
                 if self.calibrator.is_fully_calibrated():
                     try:
                         # Convert to tensors for T-pose transformation
                         global_quat_tensor = torch.tensor(global_quat, dtype=torch.float32)
                         global_acc_tensor = torch.tensor(global_acc, dtype=torch.float32)
+                        
+                        # Log pre-T-pose transformation with safer formatting
+                        try:
+                            euler = calculate_euler_from_quaternion(global_quat)
+                            logger.debug(f"PRE-TPOSE: {device_id} orientation: "
+                                        f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                        except Exception as e:
+                            logger.debug(f"PRE-TPOSE: {device_id} logging error: {e}")
                         
                         # Apply T-pose transformation
                         transformed_ori, transformed_acc = self.calibrator.apply_tpose_transformation(
@@ -514,13 +560,23 @@ class IMUReceiver:
                         if isinstance(transformed_ori, torch.Tensor):
                             # Convert rotation matrix to quaternion for display
                             from scipy.spatial.transform import Rotation as R
-                            r = R.from_matrix(transformed_ori.cpu().numpy())
-                            global_quat = r.as_quat()
-                            
+                            try:
+                                r = R.from_matrix(transformed_ori.cpu().numpy())
+                                global_quat = r.as_quat()
+                                
+                                # Log final orientation after T-pose transformation with safer formatting
+                                euler = r.as_euler('xyz', degrees=True)
+                                logger.debug(f"POST-TPOSE: {device_id} orientation: "
+                                        f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                            except Exception as e:
+                                logger.debug(f"POST-TPOSE: {device_id} matrix conversion error: {e}")
+                                
                         if isinstance(transformed_acc, torch.Tensor):
                             global_acc = transformed_acc.cpu().numpy()
                     except Exception as e:
                         logger.warning(f"Error applying T-pose transformation: {e}")
+                        import traceback
+                        logger.debug(traceback.format_exc())
             else:
                 # Not calibrated - use as is
                 global_quat = quat_for_calibration

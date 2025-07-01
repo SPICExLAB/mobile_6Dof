@@ -203,13 +203,13 @@ class IMUCalibrator:
         """
         Perform T-pose alignment for model inference.
         
-        This is the second calibration step that captures device orientations during T-pose.
+        This is the second calibration step: T-Pose Alignment.
         
         Args:
             device_orientations: dict - Device orientations during T-pose {device_id: quaternion}
             device_accelerations: dict - Device accelerations during T-pose {device_id: acceleration}
             device_gyroscopes: dict - Device gyroscopes during T-pose {device_id: gyroscope}
-            
+                
         Returns:
             tuple - (smpl2imu, device2bone, acc_offsets, gyro_offsets)
                 smpl2imu: torch.Tensor - Transformation from SMPL to IMU frame
@@ -236,7 +236,7 @@ class IMUCalibrator:
         
         logger.info(f"T-pose alignment using {reference_device} as reference device")
         
-        # Log quaternions used for calibration
+        # Log quaternions used for calibration with more detail
         for device_id, quat in device_orientations.items():
             try:
                 if hasattr(quat, 'numpy'):
@@ -247,10 +247,10 @@ class IMUCalibrator:
                     
                 r = R.from_quat(quat_np)
                 euler = r.as_euler('xyz', degrees=True)
-                logger.info(f"T-POSE: {device_id} orientation: "
-                        f"Quaternion=[{quat_np[0]:.3f}, {quat_np[1]:.3f}, {quat_np[2]:.3f}, {quat_np[3]:.3f}]")
-                logger.info(f"T-POSE: {device_id} euler: "
-                        f"X={euler[0]:.1f}°, Y={euler[1]:.1f}°, Z={euler[2]:.1f}°")
+                logger.info(f"T-POSE RAW: {device_id} orientation: "
+                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                logger.info(f"T-POSE RAW: {device_id} quaternion: "
+                        f"[{quat_np[0]:.3f}, {quat_np[1]:.3f}, {quat_np[2]:.3f}, {quat_np[3]:.3f}]")
             except Exception as e:
                 logger.warning(f"Error logging orientation for {device_id}: {e}")
         
@@ -286,6 +286,11 @@ class IMUCalibrator:
             smpl2imu = torch.eye(3)
         else:
             logger.info("Using smpl2imu transformation from global alignment.")
+            # Log the smpl2imu matrix for debugging
+            logger.info("SMPL2IMU matrix:")
+            for row in range(smpl2imu.shape[0]):
+                row_str = " ".join([f"{val:.3f}" for val in smpl2imu[row]])
+                logger.info(f"    {row_str}")
         
         # Create device to bone transformations
         device2bone = {}
@@ -303,6 +308,12 @@ class IMUCalibrator:
             
             # Create transformation to align with T-pose bones
             device2bone[device_id] = smpl2imu.matmul(rot_matrix).transpose(0, 1).matmul(torch.eye(3))
+            
+            # Log the device2bone matrix for debugging
+            logger.info(f"DEVICE2BONE: {device_id} transformation matrix:")
+            for row in range(device2bone[device_id].shape[0]):
+                row_str = " ".join([f"{val:.3f}" for val in device2bone[device_id][row]])
+                logger.info(f"    {row_str}")
         
         # Create acceleration offsets (including gravity)
         acc_offsets = {}
@@ -317,6 +328,13 @@ class IMUCalibrator:
                     
                     # Reshape and apply transformation
                     acc_offsets[device_id] = smpl2imu.matmul(acc.unsqueeze(-1))
+                    
+                    # Log acceleration offsets
+                    if hasattr(acc_offsets[device_id], 'squeeze'):
+                        acc_offset_list = acc_offsets[device_id].squeeze().tolist()
+                        logger.info(f"ACC_OFFSET: {device_id}: {acc_offset_list}")
+                    else:
+                        logger.info(f"ACC_OFFSET: {device_id}: [non-tensor format]")
         else:
             # Otherwise use default gravity values
             for device_id in device_orientations:
@@ -325,6 +343,13 @@ class IMUCalibrator:
                 
                 # Apply transformation to global frame
                 acc_offsets[device_id] = smpl2imu.matmul(gravity)
+                
+                # Log default gravity offsets
+                if hasattr(acc_offsets[device_id], 'squeeze'):
+                    acc_offset_list = acc_offsets[device_id].squeeze().tolist()
+                    logger.info(f"DEFAULT_GRAVITY: {device_id}: {acc_offset_list}")
+                else:
+                    logger.info(f"DEFAULT_GRAVITY: {device_id}: [non-tensor format]")
         
         # Create gyroscope offsets
         gyro_offsets = {}
@@ -339,6 +364,13 @@ class IMUCalibrator:
                     
                     # Reshape and apply transformation
                     gyro_offsets[device_id] = smpl2imu.matmul(gyro.unsqueeze(-1))
+                    
+                    # Log gyroscope offsets
+                    if hasattr(gyro_offsets[device_id], 'squeeze'):
+                        gyro_offset_list = gyro_offsets[device_id].squeeze().tolist()
+                        logger.info(f"GYRO_OFFSET: {device_id}: {gyro_offset_list}")
+                    else:
+                        logger.info(f"GYRO_OFFSET: {device_id}: [non-tensor format]")
         else:
             # Otherwise use zeros for gyroscope offsets
             for device_id in device_orientations:
@@ -357,6 +389,7 @@ class IMUCalibrator:
         
         logger.info("T-pose alignment completed successfully")
         return smpl2imu, device2bone, acc_offsets, gyro_offsets
+        
     
     def apply_tpose_transformation(self, device_id, quaternion, acceleration, smpl2imu=None, device2bone=None, acc_offsets=None):
         """
@@ -384,19 +417,55 @@ class IMUCalibrator:
             logger.warning(f"Missing T-pose calibration data for device {device_id}")
             return quaternion, acceleration
         
-        # Convert quaternion to rotation matrix
-        if isinstance(quaternion, np.ndarray):
-            quaternion = torch.from_numpy(quaternion).float()
-        
-        from mobileposer.articulate.math import quaternion_to_rotation_matrix
-        ori_matrix = quaternion_to_rotation_matrix(quaternion)
-        
-        # Apply transformations
-        transformed_ori = _smpl2imu.matmul(ori_matrix).matmul(_device2bone)
-        transformed_acc = (_smpl2imu.matmul(acceleration.unsqueeze(-1)) - _acc_offsets).squeeze(-1)
-        
-        return transformed_ori, transformed_acc
-    
+        try:
+            # Convert quaternion to rotation matrix
+            if isinstance(quaternion, np.ndarray):
+                quaternion = torch.from_numpy(quaternion).float()
+            
+            from mobileposer.articulate.math import quaternion_to_rotation_matrix
+            ori_matrix = quaternion_to_rotation_matrix(quaternion)
+            
+            # Log input quaternion safely
+            if hasattr(quaternion, 'detach'):
+                quat_np = quaternion.detach().cpu().numpy()
+            elif hasattr(quaternion, 'numpy'):
+                quat_np = quaternion.numpy()
+            else:
+                quat_np = quaternion
+                
+            try:
+                logger.debug(f"T-POSE TRANSFORM: {device_id} input quaternion: "
+                            f"[{float(quat_np[0]):.3f}, {float(quat_np[1]):.3f}, "
+                            f"{float(quat_np[2]):.3f}, {float(quat_np[3]):.3f}]")
+            except Exception as e:
+                logger.debug(f"T-POSE TRANSFORM: {device_id} input quaternion: [format error: {e}]")
+            
+            # Apply transformations
+            transformed_ori = _smpl2imu.matmul(ori_matrix).matmul(_device2bone)
+            transformed_acc = (_smpl2imu.matmul(acceleration.unsqueeze(-1)) - _acc_offsets).squeeze(-1)
+            
+            # Log final transformed orientation safely
+            try:
+                # Convert to rotation matrix to euler angles for logging
+                from scipy.spatial.transform import Rotation as R
+                if hasattr(transformed_ori, 'detach'):
+                    # Extract 3x3 rotation matrix and convert to euler angles
+                    rot_matrix_np = transformed_ori.detach().cpu().numpy()
+                    euler = R.from_matrix(rot_matrix_np).as_euler('xyz', degrees=True)
+                    logger.debug(f"T-POSE TRANSFORM: {device_id} final orientation: "
+                            f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                else:
+                    logger.debug(f"T-POSE TRANSFORM: {device_id} final orientation matrix shape: {transformed_ori.shape}")
+            except Exception as e:
+                logger.debug(f"T-POSE TRANSFORM: {device_id} final orientation: [logging error: {e}]")
+            
+            return transformed_ori, transformed_acc
+            
+        except Exception as e:
+            logger.warning(f"Error in apply_tpose_transformation: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return quaternion, acceleration
     #
     # Utility Methods
     #
