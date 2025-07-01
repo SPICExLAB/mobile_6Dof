@@ -533,7 +533,7 @@ class IMUReceiver:
                 
                 # Log global transformation result
                 euler = calculate_euler_from_quaternion(global_quat)
-                logger.debug(f"GLOBAL TRANSFORM: {device_id} orientation: "
+                logger.info(f"GLOBAL TRANSFORM: {device_id} orientation: "
                             f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
                 
                 # If T-pose calibration is complete, apply that transformation too
@@ -543,7 +543,7 @@ class IMUReceiver:
                         global_quat_tensor = torch.tensor(global_quat, dtype=torch.float32)
                         global_acc_tensor = torch.tensor(global_acc, dtype=torch.float32)
                         
-                        # Log pre-T-pose transformation with safer formatting
+                        # Log pre-T-pose transformation
                         try:
                             euler = calculate_euler_from_quaternion(global_quat)
                             logger.debug(f"PRE-TPOSE: {device_id} orientation: "
@@ -551,28 +551,68 @@ class IMUReceiver:
                         except Exception as e:
                             logger.debug(f"PRE-TPOSE: {device_id} logging error: {e}")
                         
+                        # Log shape information for debugging
+                        logger.debug(f"_process_device_data: {device_id} global_quat type: {type(global_quat)}, shape: {global_quat.shape if hasattr(global_quat, 'shape') else 'N/A'}")
+                        
                         # Apply T-pose transformation
                         transformed_ori, transformed_acc = self.calibrator.apply_tpose_transformation(
                             device_id, global_quat_tensor, global_acc_tensor
                         )
                         
-                        # Convert back to numpy if needed
+                        # Log transformation result shapes
+                        logger.debug(f"_process_device_data: {device_id} transformed_ori type: {type(transformed_ori)}, shape: {transformed_ori.shape if hasattr(transformed_ori, 'shape') else 'N/A'}")
+                        
+                        # Convert rotation matrix back to quaternion for visualization
                         if isinstance(transformed_ori, torch.Tensor):
-                            # Convert rotation matrix to quaternion for display
                             from scipy.spatial.transform import Rotation as R
                             try:
-                                r = R.from_matrix(transformed_ori.cpu().numpy())
-                                global_quat = r.as_quat()
-                                
-                                # Log final orientation after T-pose transformation with safer formatting
-                                euler = r.as_euler('xyz', degrees=True)
-                                logger.debug(f"POST-TPOSE: {device_id} orientation: "
-                                        f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                                # Ensure we have a proper 3x3 matrix before conversion
+                                if transformed_ori.ndim == 2 and transformed_ori.shape == (3, 3):
+                                    # Single rotation matrix [3, 3]
+                                    matrix_for_conversion = transformed_ori.cpu().numpy()
+                                    r = R.from_matrix(matrix_for_conversion)
+                                    global_quat = r.as_quat()
+                                    
+                                    # Log final orientation after T-pose transformation
+                                    euler = r.as_euler('xyz', degrees=True)
+                                    logger.info(f"POST-TPOSE: {device_id} orientation: "
+                                            f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                                elif transformed_ori.ndim > 2:
+                                    # Batched rotation matrices - take first one for display
+                                    matrix_for_conversion = transformed_ori[0].cpu().numpy()
+                                    r = R.from_matrix(matrix_for_conversion)
+                                    global_quat = r.as_quat()
+                                    
+                                    # Log final orientation
+                                    euler = r.as_euler('xyz', degrees=True)
+                                    logger.info(f"POST-TPOSE (from batch): {device_id} orientation: "
+                                            f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                                else:
+                                    # Unexpected shape - log and use original quaternion
+                                    logger.warning(f"Unexpected transformed_ori shape for {device_id}: {transformed_ori.shape}")
+                                    # Keep original global_quat
                             except Exception as e:
-                                logger.debug(f"POST-TPOSE: {device_id} matrix conversion error: {e}")
-                                
+                                logger.warning(f"POST-TPOSE: {device_id} matrix conversion error: {e}")
+                                # Keep original global_quat
+                        
+                        # Convert transformed acceleration to numpy
                         if isinstance(transformed_acc, torch.Tensor):
-                            global_acc = transformed_acc.cpu().numpy()
+                            # Handle different dimensions
+                            if transformed_acc.ndim == 1:
+                                # Single vector [3]
+                                global_acc = transformed_acc.cpu().numpy()
+                            elif transformed_acc.ndim == 2:
+                                if transformed_acc.shape[1] == 1:
+                                    # Column vector [3, 1]
+                                    global_acc = transformed_acc.squeeze(-1).cpu().numpy()
+                                else:
+                                    # Unexpected shape - log and use first row
+                                    logger.debug(f"Unexpected transformed_acc shape: {transformed_acc.shape}")
+                                    global_acc = transformed_acc[0].cpu().numpy()
+                            else:
+                                # More dimensions - take first element
+                                logger.debug(f"Complex transformed_acc shape: {transformed_acc.shape}")
+                                global_acc = transformed_acc.view(-1, 3)[0].cpu().numpy()
                     except Exception as e:
                         logger.warning(f"Error applying T-pose transformation: {e}")
                         import traceback
