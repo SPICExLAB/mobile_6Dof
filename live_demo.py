@@ -41,11 +41,7 @@ class IMUSetAdapter:
         # Initialize buffers
         self._quat_buffer = []
         self._acc_buffer = []
-        
-        # Calibration data
-        self.smpl2imu = None
-        self.device2bone = None
-        self.acc_offsets = None
+        self._rot_buffer = []
         
         # Check active devices
         active_devices = self.api.get_active_devices()
@@ -90,7 +86,10 @@ class IMUSetAdapter:
                 if device_id in all_data:
                     device_data = all_data[device_id]
                     if device_data.is_calibrated:
-                        ori_frame[i] = device_data.quaternion
+                        # Get quaternion from rotation matrix
+                        from scipy.spatial.transform import Rotation as R
+                        r = R.from_matrix(device_data.rotation_matrix)
+                        ori_frame[i] = r.as_quat()
                         acc_frame[i] = device_data.acceleration
             
             # Add to buffers
@@ -125,12 +124,16 @@ class IMUSetAdapter:
         for _ in range(self.buffer_len):
             quats = np.zeros((device_count, 4))
             accs = np.zeros((device_count, 3))
+            rots = np.zeros((device_count, 3, 3))
             
-            # Set identity quaternions
+            # Set identity quaternions and rotation matrices
             quats[:, 3] = 1.0
+            for i in range(device_count):
+                rots[i] = np.eye(3)
             
             self._quat_buffer.append(quats)
             self._acc_buffer.append(accs)
+            self._rot_buffer.append(rots)
     
     def stop_reading(self):
         """Stop reading from IMU devices"""
@@ -157,13 +160,10 @@ class IMUSetAdapter:
         
         return q, a
     
-    def update_latest_data(self):
+    def get_latest_data(self):
         """Update buffers with latest data"""
         # Get all device data
         all_data = self.api.get_all_device_data()
-        
-        # Get calibrated devices
-        calibrated_devices = [d for d in all_data if all_data[d].is_calibrated]
         
         # Device count in MobilePoseR
         device_count = 5
@@ -171,76 +171,70 @@ class IMUSetAdapter:
         # Create new frame
         ori_frame = np.zeros((device_count, 4))
         acc_frame = np.zeros((device_count, 3))
+        rot_frame = np.zeros((device_count, 3, 3))
         
-        # Set identity quaternions by default
+        # Set identity quaternions and rotation matrices by default
         ori_frame[:, 3] = 1.0
+        for i in range(device_count):
+            rot_frame[i] = np.eye(3)
         
-        # Fill data from calibrated devices
-        for i, device_id in enumerate(calibrated_devices):
-            if i >= device_count:
-                break
+        # Map device names to location mapping 
+        # 0: Left wrist, 1: Right wrist, 2: Left thigh, 3: Right thigh, 4: Head
+        device_map = {
+            'watch': 0,       # Left wrist - index 0
+            'headphone': 4,   # Head - index 4
+            'glasses': 4      # Alternative for head - index 4
+        }
+        
+        # Priority for head devices (glasses > headphone)
+        has_head_device = False
+        
+        # Fill data from calibrated devices using the mapping
+        for device_id, device_data in all_data.items():
+            if not device_data.is_calibrated:
+                continue
+                
+            # Skip if we don't have a mapping for this device
+            if device_id not in device_map:
+                continue
             
-            device_data = all_data[device_id]
-            ori_frame[i] = device_data.quaternion
-            acc_frame[i] = device_data.acceleration
+            # Special handling for head devices (glasses take priority)
+            if device_id == 'glasses' and device_map[device_id] == 4:
+                has_head_device = True
+            elif device_id == 'headphone' and device_map[device_id] == 4 and has_head_device:
+                # Skip headphone if we already have glasses data for head
+                continue
+                
+            # Get the MobilePoser index for this device
+            mobileposer_idx = device_map[device_id]
+            if mobileposer_idx >= device_count:
+                continue
+            
+            # Get quaternion from rotation matrix if available
+            from scipy.spatial.transform import Rotation as R
+            if hasattr(device_data, 'rotation_matrix') and device_data.rotation_matrix is not None:
+                r = R.from_matrix(device_data.rotation_matrix)
+                ori_frame[mobileposer_idx] = r.as_quat()
+                rot_frame[mobileposer_idx] = device_data.rotation_matrix
+            else:
+                ori_frame[mobileposer_idx] = device_data.quaternion
+            
+            acc_frame[mobileposer_idx] = device_data.acceleration
         
         # Update buffers
         self._quat_buffer.append(ori_frame)
         self._acc_buffer.append(acc_frame)
+        self._rot_buffer.append(rot_frame)
         
         # Trim buffers if too long
         if len(self._quat_buffer) > self.buffer_len:
             self._quat_buffer.pop(0)
         if len(self._acc_buffer) > self.buffer_len:
             self._acc_buffer.pop(0)
+        if len(self._rot_buffer) > self.buffer_len:
+            self._rot_buffer.pop(0)
         
-        return ori_frame, acc_frame
-    
-    def get_t_pose_calibration(self):
-        """
-        Get T-pose calibration data from receiver
-        
-        Returns:
-            tuple: (smpl2imu, device2bone, acc_offsets)
-        """
-        # Send request to get T-pose calibration data
-        response = self.api._send_request("get_t_pose_calibration")
-        
-        if not response or "error" in response:
-            print("Error getting T-pose calibration data")
-            return None, None, None
-            
-        # Deserialize the calibration data
-        calib_data = response.get("calibration", {})
-        
-        # Convert numpy arrays to torch tensors
-        smpl2imu = torch.tensor(np.array(calib_data.get("smpl2imu", [[1, 0, 0], [0, 1, 0], [0, 0, 1]])), 
-                                dtype=torch.float32)
-        
-        # Convert device2bone dictionary
-        device2bone = {}
-        for device_id, matrix_data in calib_data.get("device2bone", {}).items():
-            device2bone[device_id] = torch.tensor(np.array(matrix_data), dtype=torch.float32)
-            
-        # Convert acc_offsets dictionary
-        acc_offsets = {}
-        for device_id, offset_data in calib_data.get("acc_offsets", {}).items():
-            acc_offsets[device_id] = torch.tensor(np.array(offset_data), dtype=torch.float32)
-        
-        return smpl2imu, device2bone, acc_offsets
-
-
-def get_input():
-    global running, start_recording
-    while running:
-        c = input()
-        if c == 'q':
-            running = False
-        elif c == 'r':
-            start_recording = True
-        elif c == 's':
-            start_recording = False
-
+        return ori_frame, acc_frame, rot_frame
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -267,7 +261,7 @@ if __name__ == '__main__':
     
     print(f"✅ Found {len(calibrated_devices)} calibrated devices: {', '.join(calibrated_devices)}")
 
-    # Perform T-pose calibration
+    # Perform T-pose calibration if not already done
     input('Now please wear all IMUs correctly and press any key to continue.')
     for i in range(3, 0, -1):
         print('\rStand straight in T-pose and be ready. The calibration will begin after %d seconds.' % i, end='')
@@ -277,40 +271,10 @@ if __name__ == '__main__':
     # Request T-pose calibration from IMU receiver
     if imu_set.api.request_t_pose_calibration():
         print('\tT-pose calibration completed successfully.')
-        
-        # Get the T-pose calibration data
-        smpl2imu, device2bone, acc_offsets = imu_set.get_t_pose_calibration()
-        
-        if smpl2imu is None or not device2bone or not acc_offsets:
-            print('\n❌ Failed to get T-pose calibration data!')
-            print('Please try again with a different reference device.')
-            exit(1)
-            
-        # Store in the adapter for later use
-        imu_set.smpl2imu = smpl2imu
-        imu_set.device2bone = device2bone
-        imu_set.acc_offsets = acc_offsets
-        
-        # Prepare device2bone for MobilePoseR format
-        # Convert dictionary to tensor for easier matrix operations
-        device_bone_tensor = torch.zeros((5, 3, 3), dtype=torch.float32)
-        for i, device_id in enumerate(calibrated_devices[:5]):
-            if device_id in device2bone:
-                device_bone_tensor[i] = device2bone[device_id]
-        
-        # Prepare acc_offsets for MobilePoseR format
-        acc_offsets_tensor = torch.zeros((5, 3, 1), dtype=torch.float32)
-        for i, device_id in enumerate(calibrated_devices[:5]):
-            if device_id in acc_offsets:
-                acc_offsets_tensor[i] = acc_offsets[device_id]
     else:
         print('\n❌ T-pose calibration failed!')
         print('Please make sure all devices are calibrated in IMU_receiver.')
         exit(1)
-
-    # The IMU receiver already has the calibration, we just need to get the latest data
-    # for model inference
-    print('\nReady for pose estimation. Press q to quit')
 
     # Load model
     model = load_model(paths.weights_file)
@@ -341,10 +305,13 @@ if __name__ == '__main__':
     get_input_thread.start()
 
     n_imus = 5
-    accs, oris = [], []
-    raw_accs, raw_oris = [], []
+    accs, oris, rots = [], [], []
+    raw_accs, raw_oris = [], [], []
     poses, trans = [], []
 
+    # Start reading data
+    imu_set.start_reading()
+    
     # Main loop for collecting data and running inference
     model.eval()
     try:
@@ -352,60 +319,57 @@ if __name__ == '__main__':
             # Update clock for FPS calculation
             clock.tick(datasets.fps)
             
-            # Get latest IMU data
-            ori_raw, acc_raw = imu_set.update_latest_data()
+            # Get latest IMU data - properly mapped to expected indices
+            ori_calib, acc_calib, rot_calib = imu_set.get_latest_data()
             
             # Skip if no data
-            if ori_raw is None or acc_raw is None:
+            if ori_calib is None or acc_calib is None:
                 continue
             
-            # Convert to torch tensors and reshape for processing
-            ori_raw = torch.tensor(ori_raw, dtype=torch.float32).unsqueeze(0)
-            acc_raw = torch.tensor(acc_raw, dtype=torch.float32).unsqueeze(0)
+            # Convert to torch tensors
+            ori_calib = torch.tensor(ori_calib, dtype=torch.float32).unsqueeze(0)
+            acc_calib = torch.tensor(acc_calib, dtype=torch.float32).unsqueeze(0)
+            rot_calib = torch.tensor(rot_calib, dtype=torch.float32).unsqueeze(0)
             
             if args.save:
-                raw_accs.append(acc_raw)
-                raw_oris.append(ori_raw)
+                raw_accs.append(acc_calib)
+                raw_oris.append(ori_calib)
+                rots.append(rot_calib)
             
-            # Convert quaternions to rotation matrices
-            ori_raw = quaternion_to_rotation_matrix(ori_raw).view(-1, n_imus, 3, 3)
+            # The data is already in the correct device order, but we still need to
+            # apply MobilePoser's model input processing
             
-            # Apply calibration using the saved T-pose data
-            glb_acc = (smpl2imu.matmul(acc_raw.view(-1, n_imus, 3, 1)) - acc_offsets_tensor).view(-1, n_imus, 3)
-            glb_ori = smpl2imu.matmul(ori_raw).matmul(device_bone_tensor)
+            # Initialize empty tensors for the final input
+            acc = torch.zeros(1, 5, 3, device=device)
+            ori = torch.zeros(1, 5, 3, 3, device=device)
             
-            if args.save:
-                accs.append(glb_acc)
-                oris.append(glb_ori)
+            # Device combo - we'll use 'lw_h' which corresponds to [0, 4] after our mapping
+            combo = 'lw_h'  # left wrist and head
+            c = amass.combos[combo]  # This should be [0, 4] for 'lw_h'
             
-            # Normalization 
-            _acc = glb_acc.view(-1, 5, 3)[:, [1, 4, 3, 0, 2]] / amass.acc_scale
-            _ori = glb_ori.view(-1, 5, 3, 3)[:, [1, 4, 3, 0, 2]]
-            acc = torch.zeros_like(_acc)
-            ori = torch.zeros_like(_ori)
-
-            # Device combo
-            combo = 'lw_h'
-            # meaning we will use watch on left wristm headphone or glasses on head
-            c = amass.combos[combo]
-
-            # Filter and concat input
-            acc[:, c] = _acc[:, c] 
-            ori[:, c] = _ori[:, c]
+            # Scale accelerations
+            acc_scaled = acc_calib / amass.acc_scale
             
-            imu_input = torch.cat([acc.flatten(1), ori.flatten(1)], dim=1)
+            # Fill only the devices we need based on the combo
+            for i, idx in enumerate(c):
+                if idx < acc_scaled.shape[1]:
+                    acc[0, idx] = acc_scaled[0, idx]
+                    ori[0, idx] = rot_calib[0, idx]
+            
+            # Flatten and concatenate for model input
+            imu_input = torch.cat([acc.flatten(1), ori.flatten(1)], dim=1).to(device)
             
             # Predict pose and translation
             with torch.no_grad():
                 output = model.forward_online(imu_input.squeeze(0), [imu_input.shape[0]])
-                pred_pose = output[0] # [24, 3, 3]
-                pred_tran = output[2] # [3]
+                pred_pose = output[0]  # [24, 3, 3]
+                pred_tran = output[2]  # [3]
             
             if args.save:
                 poses.append(pred_pose)
                 trans.append(pred_tran)
             
-            # Convert rotation matrix to axis angle
+            # Convert rotation matrix to axis angle for Unity visualization
             pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
             tran = pred_tran
             
@@ -419,24 +383,21 @@ if __name__ == '__main__':
             if start_recording and not is_recording:
                 is_recording = True
                 print("\nStarted recording")
-                accs, oris, raw_accs, raw_oris, poses, trans = [], [], [], [], [], []
+                accs, oris, rots, raw_accs, raw_oris, poses, trans = [], [], [], [], [], [], []
             elif not start_recording and is_recording:
                 is_recording = False
                 print("\nStopped recording")
                 
                 # Save the recorded data
-                if args.save and accs:
+                if args.save and poses:
                     data = {
                         'raw_acc': torch.cat(raw_accs, dim=0),
                         'raw_ori': torch.cat(raw_oris, dim=0),
-                        'acc': torch.cat(accs, dim=0),
-                        'ori': torch.cat(oris, dim=0),
+                        'rot': torch.cat(rots, dim=0),
+                        'acc': torch.cat(accs, dim=0) if accs else None,
+                        'ori': torch.cat(oris, dim=0) if oris else None,
                         'pose': torch.cat(poses, dim=0),
-                        'tran': torch.cat(trans, dim=0),
-                        'calibration': {
-                            'smpl2imu': smpl2imu,
-                            'device2bone': device_bone_tensor
-                        }
+                        'tran': torch.cat(trans, dim=0)
                     }
                     save_path = paths.dev_data / f'dev_{int(time.time())}.pt'
                     torch.save(data, save_path)
@@ -450,22 +411,20 @@ if __name__ == '__main__':
         print("\nShutting down...")
     finally:
         # Stop all threads and connections
+        running = False
         get_input_thread.join(timeout=1.0)
         imu_set.stop_reading()
         
         # Save final data if recording
-        if args.save and is_recording and accs:
+        if args.save and is_recording and poses:
             data = {
                 'raw_acc': torch.cat(raw_accs, dim=0),
                 'raw_ori': torch.cat(raw_oris, dim=0),
-                'acc': torch.cat(accs, dim=0),
-                'ori': torch.cat(oris, dim=0),
+                'rot': torch.cat(rots, dim=0),
+                'acc': torch.cat(accs, dim=0) if accs else None,
+                'ori': torch.cat(oris, dim=0) if oris else None,
                 'pose': torch.cat(poses, dim=0),
-                'tran': torch.cat(trans, dim=0),
-                'calibration': {
-                    'smpl2imu': smpl2imu,
-                    'device2bone': device_bone_tensor
-                }
+                'tran': torch.cat(trans, dim=0)
             }
             save_path = paths.dev_data / f'dev_{int(time.time())}.pt'
             torch.save(data, save_path)

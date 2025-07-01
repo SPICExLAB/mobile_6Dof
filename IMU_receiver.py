@@ -229,6 +229,159 @@ class IMUReceiver:
         except Exception as e:
             logger.warning(f"Parse error: {e}")
     
+    def calibrate_all_devices(self):
+        """
+        Calibrate all active devices using the selected reference device.
+        
+        This is the first calibration step: Global Frame Alignment.
+        """
+        # Get the selected reference device
+        reference_device = self.visualizer.get_selected_reference_device()
+        
+        # If no reference device is selected, don't proceed
+        if not reference_device:
+            logger.warning("No reference device selected for calibration")
+            return None
+        
+        # Log raw orientation at time of calibration
+        for device_id, quaternion in self.current_orientations.items():
+            try:
+                euler = calculate_euler_from_quaternion(quaternion)
+                logger.info(f"PRE-CALIBRATION RAW: {device_id} orientation: "
+                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                logger.info(f"PRE-CALIBRATION RAW: {device_id} quaternion: "
+                        f"[{quaternion[0]:.3f}, {quaternion[1]:.3f}, {quaternion[2]:.3f}, {quaternion[3]:.3f}]")
+            except:
+                pass
+        
+        # Apply global frame alignment using the calibrator
+        ref_device, smpl2imu = self.calibrator.perform_global_alignment(
+            self.current_orientations,
+            reference_device
+        )
+        
+        # Update reference device in visualizer
+        self.visualizer.set_reference_device(ref_device)
+        
+        logger.info(f"Global frame alignment complete using {ref_device} as reference device")
+        
+        # Log calibrated device orientations
+        for device_id, quaternion in self.current_orientations.items():
+            try:
+                # Log raw orientation after calibration
+                euler = calculate_euler_from_quaternion(quaternion)
+                logger.info(f"POST-CALIBRATION RAW: {device_id} orientation: "
+                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                
+                # If device is calibrated, log its calibrated orientation
+                if device_id in self.calibrator.device_orientations:
+                    cal_quat = self.calibrator.device_orientations[device_id]
+                    cal_euler = calculate_euler_from_quaternion(cal_quat)
+                    logger.info(f"CALIBRATION QUATERNION: {device_id}: "
+                            f"[{cal_quat[0]:.3f}, {cal_quat[1]:.3f}, {cal_quat[2]:.3f}, {cal_quat[3]:.3f}]")
+                    logger.info(f"CALIBRATION EULER: {device_id}: "
+                            f"Roll={cal_euler[0]:.1f}°, Pitch={cal_euler[1]:.1f}°, Yaw={cal_euler[2]:.1f}°")
+                    
+                    # Apply global transformation and log result
+                    try:
+                        transformed_quat = self.calibrator.apply_global_transformation(
+                            device_id, 
+                            quaternion
+                        )
+                            
+                        display_euler = calculate_euler_from_quaternion(transformed_quat)
+                        logger.info(f"TRANSFORMED ORIENTATION: {device_id}: "
+                                f"Roll={display_euler[0]:.1f}°, Pitch={display_euler[1]:.1f}°, Yaw={display_euler[2]:.1f}°")
+                    except Exception as e:
+                        logger.warning(f"Could not calculate transformed orientation: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"Could not log orientation for {device_id}: {e}")
+        
+        return ref_device
+
+    def calibrate_t_pose(self):
+        """
+        Perform T-pose calibration for model inference
+        
+        This is the second calibration step: T-Pose Alignment.
+        
+        Returns:
+            Tuple of (smpl2imu, device2bone, acc_offsets, gyro_offsets) if successful
+        """
+        # Get the current reference device
+        reference_device = self.calibrator.reference_device
+        if not reference_device:
+            logger.warning("Cannot perform T-pose calibration: No reference device selected")
+            return None
+        
+        # Ensure all devices are already calibrated with the first step
+        calibrated_devices = self.calibrator.calibrated_devices
+        if len(calibrated_devices) == 0:
+            logger.warning("Cannot perform T-pose calibration: No devices calibrated")
+            return None
+        
+        # Collect mean orientations and accelerations for 3 seconds
+        logger.info("T-pose calibration: Collecting data for 3 seconds...")
+        
+        # Create accumulators
+        accumulated_quaternions = {}
+        accumulated_accelerations = {}
+        accumulated_gyroscopes = {}  # Add gyroscope accumulation
+        sample_count = 0
+        
+        # Collection start time
+        start_time = time.time()
+        collection_time = 3.0  # 3 seconds
+        
+        # Collect samples
+        while time.time() - start_time < collection_time:
+            # Get current orientations
+            for device_id in calibrated_devices:
+                if device_id in self.current_orientations:
+                    quat = self.current_orientations[device_id]
+                    if device_id not in accumulated_quaternions:
+                        accumulated_quaternions[device_id] = []
+                    accumulated_quaternions[device_id].append(quat)
+                    
+                    # Get acceleration if available
+                    if device_id in self.raw_device_data and 'acceleration' in self.raw_device_data[device_id]:
+                        accel = self.raw_device_data[device_id]['acceleration']
+                        if device_id not in accumulated_accelerations:
+                            accumulated_accelerations[device_id] = []
+                        accumulated_accelerations[device_id].append(accel)
+                    
+                    # Get gyroscope if available
+                    if device_id in self.raw_device_data and 'gyroscope' in self.raw_device_data[device_id]:
+                        gyro = self.raw_device_data[device_id]['gyroscope']
+                        if device_id not in accumulated_gyroscopes:
+                            accumulated_gyroscopes[device_id] = []
+                        accumulated_gyroscopes[device_id].append(gyro)
+                        
+            sample_count += 1
+            time.sleep(0.01)  # 100 Hz collection
+        
+        logger.info(f"T-pose calibration: Collected {sample_count} samples for {len(accumulated_quaternions)} devices")
+        
+        # Calculate mean orientations, accelerations, and gyroscopes
+        device_orientations = {}
+        device_accelerations = {}
+        device_gyroscopes = {}
+        
+        for device_id, quats in accumulated_quaternions.items():
+            device_orientations[device_id] = np.mean(np.array(quats), axis=0)
+            
+        for device_id, accels in accumulated_accelerations.items():
+            device_accelerations[device_id] = np.mean(np.array(accels), axis=0)
+        
+        for device_id, gyros in accumulated_gyroscopes.items():
+            device_gyroscopes[device_id] = np.mean(np.array(gyros), axis=0)
+        
+        # Call calibrate_t_pose from the calibrator
+        result = self.calibrator.perform_tpose_alignment(device_orientations, device_accelerations, device_gyroscopes)
+        
+        return result
+
     def _process_device_data(self, device_id, parsed_data, addr):
         """
         Process parsed device data.
@@ -305,25 +458,46 @@ class IMUReceiver:
                     self.raw_device_data[device_id]['frame_counter'] = 0
             
             # Apply calibration transformation if device is calibrated
-            calibration_quats = self.calibrator.get_calibration_quaternions()
-            reference_device = self.calibrator.reference_device
-            if device_id in calibration_quats:
-                # Transform using calibration with gyroscope
-                result = apply_calibration_transform(
-                    quat_for_calibration, 
-                    accel_for_processing, 
-                    calibration_quats, 
-                    device_id,
-                    reference_device=reference_device,
-                    gyro=gyro_for_processing
-                )
-                
-                # Check if the result includes gyroscope
-                if len(result) == 3:
-                    global_quat, global_acc, global_gyro = result
+            if device_id in self.calibrator.device_orientations:
+                # Apply global transformation with gyroscope
+                if gyro_for_processing is not None:
+                    global_quat, global_acc, global_gyro = self.calibrator.apply_global_transformation(
+                        device_id, 
+                        quat_for_calibration, 
+                        accel_for_processing,
+                        gyro=gyro_for_processing
+                    )
                 else:
-                    global_quat, global_acc = result
+                    global_quat, global_acc = self.calibrator.apply_global_transformation(
+                        device_id, 
+                        quat_for_calibration, 
+                        accel_for_processing
+                    )
                     global_gyro = gyro_for_processing  # Use processed gyro if not returned
+                    
+                # If T-pose calibration is complete, apply that transformation too
+                if self.calibrator.is_fully_calibrated():
+                    try:
+                        # Convert to tensors for T-pose transformation
+                        global_quat_tensor = torch.tensor(global_quat, dtype=torch.float32)
+                        global_acc_tensor = torch.tensor(global_acc, dtype=torch.float32)
+                        
+                        # Apply T-pose transformation
+                        transformed_ori, transformed_acc = self.calibrator.apply_tpose_transformation(
+                            device_id, global_quat_tensor, global_acc_tensor
+                        )
+                        
+                        # Convert back to numpy if needed
+                        if isinstance(transformed_ori, torch.Tensor):
+                            # Convert rotation matrix to quaternion for display
+                            from scipy.spatial.transform import Rotation as R
+                            r = R.from_matrix(transformed_ori.cpu().numpy())
+                            global_quat = r.as_quat()
+                            
+                        if isinstance(transformed_acc, torch.Tensor):
+                            global_acc = transformed_acc.cpu().numpy()
+                    except Exception as e:
+                        logger.warning(f"Error applying T-pose transformation: {e}")
             else:
                 # Not calibrated - use as is
                 global_quat = quat_for_calibration
@@ -345,193 +519,20 @@ class IMUReceiver:
                 timestamp=timestamp,
                 device_id=device_id,
                 accelerometer=linear_accel,
-                gyroscope=global_gyro,  # Now using global-frame gyroscope
+                gyroscope=global_gyro,
                 quaternion=global_quat,
                 euler=euler_deg
             )
             
             # Update visualization
-            is_calibrated = device_id in self.calibrator.reference_quaternions
-            self.visualizer.update_device_data(imu_data, is_calibrated)
+            is_calibrated = device_id in self.calibrator.device_orientations
+            is_reference = device_id == self.calibrator.reference_device
+            self.visualizer.update_device_data(imu_data, is_calibrated, is_reference)
                     
         except Exception as e:
             logger.warning(f"Error processing {device_id} data: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-    
-    def calibrate_all_devices(self):
-        """
-        Calibrate all active devices using the selected reference device.
-        
-        This assumes the user has already physically aligned the reference device
-        with the global frame before calibration.
-        """
-        # Get the selected reference device
-        reference_device = self.visualizer.get_selected_reference_device()
-        
-        # If no reference device is selected, don't proceed
-        if not reference_device:
-            logger.warning("No reference device selected for calibration")
-            return None
-        
-        # Log raw orientation at time of calibration
-        for device_id, quaternion in self.current_orientations.items():
-            try:
-                euler = calculate_euler_from_quaternion(quaternion)
-                logger.info(f"PRE-CALIBRATION RAW: {device_id} orientation: "
-                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
-                logger.info(f"PRE-CALIBRATION RAW: {device_id} quaternion: "
-                        f"[{quaternion[0]:.3f}, {quaternion[1]:.3f}, {quaternion[2]:.3f}, {quaternion[3]:.3f}]")
-            except:
-                pass
-        
-        # Apply calibration using global identity alignment
-        calibration_quats, ref_device = align_global_identity(
-            self.current_orientations,
-            reference_device
-        )
-        
-        # Update calibrator with new calibration quaternions
-        for device_id, quat in calibration_quats.items():
-            self.calibrator.set_reference_orientation(device_id, quat)
-        
-        # Update reference device in calibrator
-        self.calibrator.reference_device = ref_device
-        
-        # Update reference device in visualizer
-        self.visualizer.set_reference_device(ref_device)
-        
-        logger.info(f"Calibration complete using {ref_device} as reference device")
-        
-        # Log Euler angles for each device after calibration
-        for device_id, quaternion in self.current_orientations.items():
-            try:
-                # Log raw orientation after calibration
-                euler = calculate_euler_from_quaternion(quaternion)
-                logger.info(f"POST-CALIBRATION RAW: {device_id} orientation: "
-                        f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
-                
-                # If device is calibrated, log its calibrated orientation
-                if device_id in calibration_quats:
-                    cal_quat = calibration_quats[device_id]
-                    cal_euler = calculate_euler_from_quaternion(cal_quat)
-                    logger.info(f"CALIBRATION QUATERNION: {device_id}: "
-                            f"[{cal_quat[0]:.3f}, {cal_quat[1]:.3f}, {cal_quat[2]:.3f}, {cal_quat[3]:.3f}]")
-                    logger.info(f"CALIBRATION EULER: {device_id}: "
-                            f"Roll={cal_euler[0]:.1f}°, Pitch={cal_euler[1]:.1f}°, Yaw={cal_euler[2]:.1f}°")
-                    
-                    # Attempt to log what would be displayed with this calibration
-                    try:
-                        # This will show what happens when we apply the calibration to current orientation
-                        if device_id in self.raw_device_data and 'aligned_gyroscope' in self.raw_device_data[device_id]:
-                            global_quat, global_acc, _ = apply_calibration_transform(
-                                quaternion, 
-                                np.zeros(3), 
-                                calibration_quats, 
-                                device_id,
-                                gyro=self.raw_device_data[device_id]['aligned_gyroscope']
-                            )
-                        else:
-                            global_quat, global_acc = apply_calibration_transform(
-                                quaternion, 
-                                np.zeros(3), 
-                                calibration_quats, 
-                                device_id
-                            )
-                            
-                        display_euler = calculate_euler_from_quaternion(global_quat)
-                        logger.info(f"DISPLAY ORIENTATION: {device_id}: "
-                                f"Roll={display_euler[0]:.1f}°, Pitch={display_euler[1]:.1f}°, Yaw={display_euler[2]:.1f}°")
-                    except Exception as e:
-                        logger.warning(f"Could not calculate display orientation: {e}")
-                        
-            except Exception as e:
-                logger.warning(f"Could not log orientation for {device_id}: {e}")
-        
-        return ref_device
-    
-    def calibrate_t_pose(self):
-        """
-        Perform T-pose calibration for model inference
-        
-        This is the second calibration step for MobilePoser, which captures
-        device orientations during T-pose and calculates bone alignment
-        
-        Returns:
-            Tuple of (smpl2imu, device2bone, acc_offsets, gyro_offsets) if successful
-        """
-        # Get the current reference device
-        reference_device = self.calibrator.reference_device
-        if not reference_device:
-            logger.warning("Cannot perform T-pose calibration: No reference device selected")
-            return None
-        
-        # Ensure all devices are already calibrated with the first step
-        calibrated_devices = self.calibrator.calibrated_devices
-        if len(calibrated_devices) == 0:
-            logger.warning("Cannot perform T-pose calibration: No devices calibrated")
-            return None
-        
-        # Collect mean orientations and accelerations for 3 seconds
-        logger.info("T-pose calibration: Collecting data for 3 seconds...")
-        
-        # Create accumulators
-        accumulated_quaternions = {}
-        accumulated_accelerations = {}
-        accumulated_gyroscopes = {}  # Add gyroscope accumulation
-        sample_count = 0
-        
-        # Collection start time
-        start_time = time.time()
-        collection_time = 3.0  # 3 seconds
-        
-        # Collect samples
-        while time.time() - start_time < collection_time:
-            # Get current orientations
-            for device_id in calibrated_devices:
-                if device_id in self.current_orientations:
-                    quat = self.current_orientations[device_id]
-                    if device_id not in accumulated_quaternions:
-                        accumulated_quaternions[device_id] = []
-                    accumulated_quaternions[device_id].append(quat)
-                    
-                    # Get acceleration if available
-                    if device_id in self.raw_device_data and 'acceleration' in self.raw_device_data[device_id]:
-                        accel = self.raw_device_data[device_id]['acceleration']
-                        if device_id not in accumulated_accelerations:
-                            accumulated_accelerations[device_id] = []
-                        accumulated_accelerations[device_id].append(accel)
-                    
-                    # Get gyroscope if available
-                    if device_id in self.raw_device_data and 'gyroscope' in self.raw_device_data[device_id]:
-                        gyro = self.raw_device_data[device_id]['gyroscope']
-                        if device_id not in accumulated_gyroscopes:
-                            accumulated_gyroscopes[device_id] = []
-                        accumulated_gyroscopes[device_id].append(gyro)
-                        
-            sample_count += 1
-            time.sleep(0.01)  # 100 Hz collection
-        
-        logger.info(f"T-pose calibration: Collected {sample_count} samples for {len(accumulated_quaternions)} devices")
-        
-        # Calculate mean orientations, accelerations, and gyroscopes
-        device_orientations = {}
-        device_accelerations = {}
-        device_gyroscopes = {}
-        
-        for device_id, quats in accumulated_quaternions.items():
-            device_orientations[device_id] = np.mean(np.array(quats), axis=0)
-            
-        for device_id, accels in accumulated_accelerations.items():
-            device_accelerations[device_id] = np.mean(np.array(accels), axis=0)
-        
-        for device_id, gyros in accumulated_gyroscopes.items():
-            device_gyroscopes[device_id] = np.mean(np.array(gyros), axis=0)
-        
-        # Call calibrate_t_pose from the calibrator
-        result = self.calibrator.calibrate_t_pose(device_orientations, device_accelerations, device_gyroscopes)
-        
-        return result
     
     def get_t_pose_calibration(self):
         """

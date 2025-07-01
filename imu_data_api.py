@@ -18,11 +18,12 @@ class CalibratedIMUData:
     timestamp: float
     device_name: str
     frequency: float
-    acceleration: np.ndarray      # [3] - gravity-removed, calibrated
-    rotation_matrix: np.ndarray   # [3, 3] - calibrated relative to global frame
-    quaternion: np.ndarray        # [4] - calibrated quaternion (x,y,z,w)
-    gyroscope: Optional[np.ndarray] = None  # [3] - gyroscope data if available
+    acceleration: np.ndarray      # [3] - fully calibrated (gravity removed, aligned to global frame)
+    rotation_matrix: np.ndarray   # [3, 3] - fully calibrated (aligned to bone/model frame)
+    quaternion: np.ndarray        # [4] - original quaternion for reference
+    gyroscope: Optional[np.ndarray] = None  # [3] - calibrated gyroscope data if available
     is_calibrated: bool = False
+    is_reference: bool = False
 
 
 class IMUDataAPI:
@@ -83,17 +84,10 @@ class IMUDataAPI:
             if "error" in response:
                 return None
             
-            # Convert response to CalibratedIMUData
+            # Create CalibratedIMUData from response
             acceleration = np.array(response['acceleration'])
             rotation_matrix = np.array(response['rotation_matrix'])
-            
-            # Extract quaternion from rotation matrix if not provided
-            if 'quaternion' in response:
-                quaternion = np.array(response['quaternion'])
-            else:
-                r = R.from_matrix(rotation_matrix)
-                quaternion = r.as_quat()
-                
+            quaternion = np.array(response['quaternion'])
             gyroscope = np.array(response['gyroscope']) if response['gyroscope'] else None
             
             return CalibratedIMUData(
@@ -104,7 +98,8 @@ class IMUDataAPI:
                 rotation_matrix=rotation_matrix,
                 quaternion=quaternion,
                 gyroscope=gyroscope,
-                is_calibrated=response['is_calibrated']
+                is_calibrated=response['is_calibrated'],
+                is_reference=response.get('is_reference', False)
             )
             
         except Exception as e:

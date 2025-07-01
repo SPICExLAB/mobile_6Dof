@@ -34,7 +34,7 @@ class CalibrationButton:
         pygame.draw.rect(self.screen, Colors.TEXT, self.rect, 2)
         
         # Button text
-        text = self.font_manager.render_text("CALIBRATE", 'medium', Colors.TEXT)
+        text = self.font_manager.render_text("ALIGN GLOBAL", 'medium', Colors.TEXT)
         text_rect = text.get_rect(center=self.rect.center)
         self.screen.blit(text, text_rect)
         
