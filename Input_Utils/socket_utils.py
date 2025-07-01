@@ -193,13 +193,18 @@ class ApiServer:
     def _handle_request(self, request):
         """Handle API requests and return JSON responses"""
         try:
+            # print(f"Received API request: {request}")
+
             if request == "get_all_devices":
                 devices = {}
                 active_devices = self.callbacks.get('get_active_devices', lambda: [])()
+                # print(active_devices)
                 for device_id in active_devices:
                     device_data = self.callbacks.get('get_device_data', lambda x: None)(device_id)
+                    
                     if device_data:
                         devices[device_id] = device_data
+                        # print(devices[device_id])
                 return json.dumps(devices)
                 
             elif request.startswith("get_device:"):
@@ -221,15 +226,17 @@ class ApiServer:
                 
             elif request == "get_t_pose_calibration":
                 t_pose_data = self.callbacks.get('get_t_pose_calibration', lambda: None)()
+              
                 if t_pose_data:
-                    smpl2imu, device2bone, acc_offsets = t_pose_data
+                    smpl2imu, device2bone, acc_offsets, gyro_offsets = t_pose_data  # Unpack 4 elements
                     
                     # Convert to JSON-serializable format
                     result = {
                         "calibration": {
                             "smpl2imu": smpl2imu.tolist() if hasattr(smpl2imu, 'tolist') else smpl2imu,
                             "device2bone": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in device2bone.items()},
-                            "acc_offsets": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in acc_offsets.items()}
+                            "acc_offsets": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in acc_offsets.items()},
+                            "gyro_offsets": {k: v.tolist() if hasattr(v, 'tolist') else v for k, v in gyro_offsets.items()}
                         }
                     }
                     return json.dumps(result)

@@ -13,6 +13,7 @@ Key improvements:
 
 import numpy as np
 import time
+import torch
 from collections import deque
 import logging
 from scipy.spatial.transform import Rotation as R
@@ -187,18 +188,34 @@ class IMUReceiver:
         global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
         device_calibrated = device_id in self.calibrator.calibrated_devices
         
-        return {
-            'timestamp': device_data['last_update'],
+        # Helper function to convert NumPy values to standard Python values
+        def to_python_type(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.float32) or isinstance(obj, np.float64):
+                return float(obj)
+            elif isinstance(obj, np.int32) or isinstance(obj, np.int64):
+                return int(obj)
+            elif isinstance(obj, list) or isinstance(obj, tuple):
+                return [to_python_type(item) for item in obj]
+            else:
+                return obj
+        
+        # Convert all values to standard Python types
+        result = {
+            'timestamp': to_python_type(device_data['last_update']),
             'device_name': device_id,
-            'frequency': device_data.get('frequency', 0.0),
-            'acceleration': latest_acceleration,
-            'rotation_matrix': rotation_matrix.tolist(),
-            'quaternion': quaternion.tolist(), 
-            'gyroscope': gyroscope,
-            'is_calibrated': global_alignment_complete and device_calibrated,
-            'is_reference': device_id == self.calibrator.reference_device
+            'frequency': to_python_type(device_data.get('frequency', 0.0)),
+            'acceleration': to_python_type(latest_acceleration),
+            'rotation_matrix': to_python_type(rotation_matrix),
+            'quaternion': to_python_type(quaternion), 
+            'gyroscope': to_python_type(gyroscope),
+            'is_calibrated': bool(global_alignment_complete and device_calibrated),
+            'is_reference': bool(device_id == self.calibrator.reference_device)
         }
-    
+        
+        return result
+        
     def _parse_data(self, message, addr):
         """Parse incoming data from socket"""
         try:
@@ -516,9 +533,14 @@ class IMUReceiver:
             else:
                 # Use acceleration without gravity compensation
                 linear_accel = global_acc
-            
+
+            if isinstance(global_quat, np.ndarray) and global_quat.ndim > 1:
+                global_quat_1d = global_quat.flatten()
+            else:
+                global_quat_1d = global_quat
+
             # Calculate Euler angles for display
-            euler_deg = calculate_euler_from_quaternion(global_quat)
+            euler_deg = calculate_euler_from_quaternion(global_quat_1d)
             
             # Create IMU data with the transformed values
             imu_data = IMUData(
@@ -547,7 +569,11 @@ class IMUReceiver:
         Returns:
             tuple: (smpl2imu, device2bone, acc_offsets, gyro_offsets) if T-pose calibration has been performed
         """
-        return self.calibrator.get_t_pose_calibration()
+        print("get_t_pose_calibration called")
+        # Change this line to call the correct method
+        result = self.calibrator.get_tpose_alignment()
+        print(f"get_t_pose_calibration result: {result}")
+        return result
 
     def process_data(self):
         """Process any pending data from the socket receiver"""
