@@ -182,6 +182,10 @@ class IMUReceiver:
             latest_gyro = list(gyro_history[-1])
             if sum(abs(x) for x in latest_gyro) > 0.001:
                 gyroscope = latest_gyro
+
+        # Check calibration status based on global alignment
+        global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
+        device_calibrated = device_id in self.calibrator.calibrated_devices
         
         return {
             'timestamp': device_data['last_update'],
@@ -190,7 +194,7 @@ class IMUReceiver:
             'acceleration': latest_acceleration,
             'rotation_matrix': rotation_matrix.tolist(),
             'gyroscope': gyroscope,
-            'is_calibrated': device_id in self.calibrator.reference_quaternions,
+            'is_calibrated': global_alignment_complete and device_calibrated,
             'is_reference': device_id == self.calibrator.reference_device
         }
     
@@ -456,14 +460,17 @@ class IMUReceiver:
                     self.raw_device_data[device_id]['frame_counter'] = 0
             
             # Apply calibration transformation if device is calibrated
-            if device_id in self.calibrator.device_orientations:
+            global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
+            device_calibrated = device_id in self.calibrator.calibrated_devices
+            
+            if global_alignment_complete and device_calibrated:
                 # Apply global transformation with gyroscope
                 if gyro_for_processing is not None:
                     global_quat, global_acc, global_gyro = self.calibrator.apply_global_transformation(
                         device_id, 
                         quat_for_calibration, 
                         accel_for_processing,
-                        gyro=gyro_for_processing
+                        gyroscope=gyro_for_processing
                     )
                 else:
                     global_quat, global_acc = self.calibrator.apply_global_transformation(
@@ -523,7 +530,7 @@ class IMUReceiver:
             )
             
             # Update visualization
-            is_calibrated = device_id in self.calibrator.device_orientations
+            is_calibrated = global_alignment_complete and device_calibrated
             is_reference = device_id == self.calibrator.reference_device
             self.visualizer.update_device_data(imu_data, is_calibrated, is_reference)
                     

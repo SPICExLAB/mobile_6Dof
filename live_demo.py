@@ -252,14 +252,16 @@ if __name__ == '__main__':
     print("Checking if devices are calibrated in IMU_receiver...")
     active_devices = imu_set.api.get_active_devices()
     calibrated_devices = [d for d in active_devices if imu_set.api.is_device_calibrated(d)]
-    
+
     if not calibrated_devices:
         print("❌ No calibrated devices found!")
-        print("Please calibrate devices in IMU_receiver first.")
-        print("Press the CALIBRATE button in the IMU_receiver window.")
+        print("Please complete Global Alignment in IMU_receiver first:")
+        print("1. Select a reference device (e.g., watch)")
+        print("2. Press the ALIGN GLOBAL button in the IMU_receiver window")
         exit(1)
-    
+
     print(f"✅ Found {len(calibrated_devices)} calibrated devices: {', '.join(calibrated_devices)}")
+
 
     # Perform T-pose calibration if not already done
     input('Now please wear all IMUs correctly and press any key to continue.')

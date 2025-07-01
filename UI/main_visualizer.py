@@ -106,7 +106,7 @@ class IMUVisualizer:
         # Device panels will be created dynamically
         self.device_panels = {}
     
-    def update_device_data(self, imu_data, is_calibrated: bool):
+    def update_device_data(self, imu_data, is_calibrated: bool, is_reference: bool = False):
         """Update device data for visualization"""
         device_id = imu_data.device_id
         
@@ -122,6 +122,7 @@ class IMUVisualizer:
                 'last_update': 0,
                 'sample_count': 0,
                 'is_calibrated': False,
+                'is_reference': False,
                 'frequency': 0,
                 'frequency_counter': 0,
                 'frequency_timer': time.time(),
@@ -138,6 +139,7 @@ class IMUVisualizer:
         data['last_update'] = time.time()
         data['sample_count'] += 1
         data['is_calibrated'] = is_calibrated
+        data['is_reference'] = is_reference
         
         # Periodic logging of device orientation (every 120 frames)
         data['log_counter'] = (data['log_counter'] + 1) % 120
@@ -145,7 +147,7 @@ class IMUVisualizer:
             try:
                 euler = imu_data.euler if imu_data.euler is not None else [0, 0, 0]
                 status = "CALIBRATED" if is_calibrated else "UNCALIBRATED"
-                is_ref = "REFERENCE" if device_id == self.reference_device else ""
+                is_ref = "REFERENCE" if is_reference else ""
                 logger.debug(f"PERIODIC {status} {is_ref}: {device_id} orientation: "
                             f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
             except:
