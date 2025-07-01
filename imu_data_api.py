@@ -76,9 +76,8 @@ class IMUDataAPI:
             CalibratedIMUData object or None if device not active/calibrated
         """
         try:
-            print(f"Getting device data for {device_id}")
+           
             response = self._send_request(f"get_device:{device_id}")
-            print(f"Response for get_device:{device_id}: {response}")
             
             if not response or response is None:
                 return None

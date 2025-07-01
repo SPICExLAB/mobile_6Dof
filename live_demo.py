@@ -1,5 +1,5 @@
 """
-MobilePoseR Live Demo with IMU_receiver Integration
+MobilePoser Live Demo with IMU_receiver Integration
 File: live_demo.py
 
 Usage:
@@ -87,9 +87,7 @@ class IMUSetAdapter:
                     device_data = all_data[device_id]
                     if device_data.is_calibrated:
                         # Get quaternion from rotation matrix
-                        from scipy.spatial.transform import Rotation as R
-                        r = R.from_matrix(device_data.rotation_matrix)
-                        ori_frame[i] = r.as_quat()
+                        ori_frame[i] = device_data.quaternion
                         acc_frame[i] = device_data.acceleration
             
             # Add to buffers
@@ -114,51 +112,6 @@ class IMUSetAdapter:
         else:
             print("No data collected!")
             return None, None
-    
-    def start_reading(self):
-        """Start reading from IMU devices"""
-        print("Starting IMU data reading...")
-        # Pre-fill buffers with placeholder data
-        device_count = 5
-        
-        for _ in range(self.buffer_len):
-            quats = np.zeros((device_count, 4))
-            accs = np.zeros((device_count, 3))
-            rots = np.zeros((device_count, 3, 3))
-            
-            # Set identity quaternions and rotation matrices
-            quats[:, 3] = 1.0
-            for i in range(device_count):
-                rots[i] = np.eye(3)
-            
-            self._quat_buffer.append(quats)
-            self._acc_buffer.append(accs)
-            self._rot_buffer.append(rots)
-    
-    def stop_reading(self):
-        """Stop reading from IMU devices"""
-        print("Stopping IMU data reading...")
-        self.api.close()
-    
-    def get_current_buffer(self):
-        """
-        Get current orientation and acceleration buffers
-        
-        Returns:
-            Tuple of (quaternion_buffer, acceleration_buffer) as torch tensors
-        """
-        # Get all active devices
-        active_devices = self.api.get_active_devices()
-        calibrated_devices = [d for d in active_devices if self.api.is_device_calibrated(d)]
-        
-        # Device count in MobilePoseR
-        device_count = 5
-        
-        # Convert buffer to torch tensors
-        q = torch.tensor(np.array(self._quat_buffer), dtype=torch.float32)
-        a = torch.tensor(np.array(self._acc_buffer), dtype=torch.float32)
-        
-        return q, a
     
     def get_latest_data(self):
         """Update buffers with latest data"""
@@ -210,15 +163,9 @@ class IMUSetAdapter:
             if mobileposer_idx >= device_count:
                 continue
             
-            # Get quaternion from rotation matrix if available
-            from scipy.spatial.transform import Rotation as R
-            if hasattr(device_data, 'rotation_matrix') and device_data.rotation_matrix is not None:
-                r = R.from_matrix(device_data.rotation_matrix)
-                ori_frame[mobileposer_idx] = r.as_quat()
-                rot_frame[mobileposer_idx] = device_data.rotation_matrix
-            else:
-                ori_frame[mobileposer_idx] = device_data.quaternion
-            
+            # Get quaternion and rotation matrix
+            ori_frame[mobileposer_idx] = device_data.quaternion
+            rot_frame[mobileposer_idx] = device_data.rotation_matrix
             acc_frame[mobileposer_idx] = device_data.acceleration
         
         # Update buffers
@@ -236,11 +183,73 @@ class IMUSetAdapter:
         
         return ori_frame, acc_frame, rot_frame
 
+    def stop_reading(self):
+        """Close API connection"""
+        self.api.close()
+        print("IMU data connection closed")
+
+# Simple class for handling user input
+class InputHandler:
+    def __init__(self):
+        self.running = True
+        self.recording = False
+        self.thread = None
+    
+    def start(self):
+        """Start the input handling thread"""
+        self.thread = threading.Thread(target=self._input_loop)
+        self.thread.daemon = True
+        self.thread.start()
+        
+    def _input_loop(self):
+        """Handle user input"""
+        print("\nControl commands:")
+        print("  'q' - Quit the application")
+        print("  'r' - Toggle recording")
+        
+        while self.running:
+            try:
+                c = input()
+                if c == 'q':
+                    self.running = False
+                    print("Quitting application...")
+                elif c == 'r':
+                    self.recording = not self.recording
+                    print(f"Recording {'started' if self.recording else 'stopped'}")
+            except Exception as e:
+                pass  # Ignore input errors
+    
+    def stop(self):
+        """Stop the input handling thread"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=0.5)
+
+
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--vis", action='store_true')
     parser.add_argument("--save", action='store_true')
     args = parser.parse_args()
+    
+    # Patch numpy for chumpy compatibility
+    import numpy as np
+    import sys
+    try:
+        sys.modules['numpy'].bool = np.bool_
+        sys.modules['numpy'].int = np.int_
+        sys.modules['numpy'].float = np.float_
+        sys.modules['numpy'].complex = np.complex_
+        sys.modules['numpy'].object = np.object_
+        sys.modules['numpy'].str = np.str_
+        # Add unicode if available
+        if hasattr(np, 'unicode_'):
+            sys.modules['numpy'].unicode = np.unicode_
+        elif hasattr(np, 'str_'):
+            sys.modules['numpy'].unicode = np.str_
+        print("✅ Patched NumPy for chumpy compatibility")
+    except Exception as e:
+        print(f"⚠️ Warning: Failed to patch NumPy: {e}")
     
     # Specify device
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -262,11 +271,10 @@ if __name__ == '__main__':
 
     print(f"✅ Found {len(calibrated_devices)} calibrated devices: {', '.join(calibrated_devices)}")
 
-
     # Perform T-pose calibration if not already done
     input('Now please wear all IMUs correctly and press any key to continue.')
     for i in range(3, 0, -1):
-        print('\rStand straight in T-pose and be ready. The calibration will begin after %d seconds.' % i, end='')
+        print(f'\rStand straight in T-pose and be ready. The calibration will begin after {i} seconds.', end='')
         time.sleep(1)
     print('\nStand straight in T-pose. Keep the pose for 3 seconds ...', end='')
 
@@ -296,28 +304,23 @@ if __name__ == '__main__':
         print('Server start. Waiting for unity3d to connect.')
         conn, addr = server_for_unity.accept()
 
-    running = True
+    # Setup input handler
+    input_handler = InputHandler()
+    input_handler.start()
+
+    # Initialize variables for recording
+    recording_data = {
+        'accs': [], 'oris': [], 'rots': [],
+        'raw_accs': [], 'raw_oris': [],
+        'poses': [], 'trans': []
+    }
+
     clock = Clock()
-    is_recording = False
-    record_buffer = None
-    start_recording = False
-
-    get_input_thread = threading.Thread(target=get_input)
-    get_input_thread.setDaemon(True)
-    get_input_thread.start()
-
-    n_imus = 5
-    accs, oris, rots = [], [], []
-    raw_accs, raw_oris = [], [], []
-    poses, trans = [], []
-
-    # Start reading data
-    imu_set.start_reading()
     
     # Main loop for collecting data and running inference
     model.eval()
     try:
-        while running:
+        while input_handler.running:
             # Update clock for FPS calculation
             clock.tick(datasets.fps)
             
@@ -333,10 +336,11 @@ if __name__ == '__main__':
             acc_calib = torch.tensor(acc_calib, dtype=torch.float32).unsqueeze(0)
             rot_calib = torch.tensor(rot_calib, dtype=torch.float32).unsqueeze(0)
             
-            if args.save:
-                raw_accs.append(acc_calib)
-                raw_oris.append(ori_calib)
-                rots.append(rot_calib)
+            # Handle recording if enabled
+            if args.save and input_handler.recording:
+                recording_data['raw_accs'].append(acc_calib.clone())
+                recording_data['raw_oris'].append(ori_calib.clone())
+                recording_data['rots'].append(rot_calib.clone())
             
             # The data is already in the correct device order, but we still need to
             # apply MobilePoser's model input processing
@@ -367,9 +371,10 @@ if __name__ == '__main__':
                 pred_pose = output[0]  # [24, 3, 3]
                 pred_tran = output[2]  # [3]
             
-            if args.save:
-                poses.append(pred_pose)
-                trans.append(pred_tran)
+            # Record predicted data if enabled
+            if args.save and input_handler.recording:
+                recording_data['poses'].append(pred_pose.clone())
+                recording_data['trans'].append(pred_tran.clone())
             
             # Convert rotation matrix to axis angle for Unity visualization
             pose = rotation_matrix_to_axis_angle(pred_pose.view(1, 216)).view(72)
@@ -381,55 +386,33 @@ if __name__ == '__main__':
                     ','.join(['%g' % v for v in tran]) + '$'
                 conn.send(s.encode('utf8'))
             
-            # Handle recording if requested
-            if start_recording and not is_recording:
-                is_recording = True
-                print("\nStarted recording")
-                accs, oris, rots, raw_accs, raw_oris, poses, trans = [], [], [], [], [], [], []
-            elif not start_recording and is_recording:
-                is_recording = False
-                print("\nStopped recording")
-                
-                # Save the recorded data
-                if args.save and poses:
-                    data = {
-                        'raw_acc': torch.cat(raw_accs, dim=0),
-                        'raw_ori': torch.cat(raw_oris, dim=0),
-                        'rot': torch.cat(rots, dim=0),
-                        'acc': torch.cat(accs, dim=0) if accs else None,
-                        'ori': torch.cat(oris, dim=0) if oris else None,
-                        'pose': torch.cat(poses, dim=0),
-                        'tran': torch.cat(trans, dim=0)
-                    }
-                    save_path = paths.dev_data / f'dev_{int(time.time())}.pt'
-                    torch.save(data, save_path)
-                    print(f"Recording saved to {save_path}")
-            
-            # Debug output
-            if os.getenv("DEBUG") is not None:
-                print('\r', '(recording)' if is_recording else '', 'Output FPS:', clock.get_fps(), end='')
+            # Print status
+            if not args.vis:
+                print(f"\rCombo: {combo} | FPS: {clock.get_fps():.1f} {'| Recording' if input_handler.recording else ''}", end='')
             
     except KeyboardInterrupt:
         print("\nShutting down...")
+    except Exception as e:
+        print(f"\nError: {e}")
     finally:
-        # Stop all threads and connections
-        running = False
-        get_input_thread.join(timeout=1.0)
+        # Clean up resources
+        input_handler.stop()
         imu_set.stop_reading()
         
-        # Save final data if recording
-        if args.save and is_recording and poses:
-            data = {
-                'raw_acc': torch.cat(raw_accs, dim=0),
-                'raw_ori': torch.cat(raw_oris, dim=0),
-                'rot': torch.cat(rots, dim=0),
-                'acc': torch.cat(accs, dim=0) if accs else None,
-                'ori': torch.cat(oris, dim=0) if oris else None,
-                'pose': torch.cat(poses, dim=0),
-                'tran': torch.cat(trans, dim=0)
-            }
-            save_path = paths.dev_data / f'dev_{int(time.time())}.pt'
-            torch.save(data, save_path)
-            print(f"Final recording saved to {save_path}")
-            
-        print('Finish.')
+        # Save recording data if available
+        if args.save and recording_data['poses']:
+            try:
+                data = {
+                    'raw_acc': torch.cat(recording_data['raw_accs'], dim=0),
+                    'raw_ori': torch.cat(recording_data['raw_oris'], dim=0),
+                    'rot': torch.cat(recording_data['rots'], dim=0),
+                    'pose': torch.cat(recording_data['poses'], dim=0),
+                    'tran': torch.cat(recording_data['trans'], dim=0)
+                }
+                save_path = paths.dev_data / f'dev_{int(time.time())}.pt'
+                torch.save(data, save_path)
+                print(f"\nRecording saved to {save_path}")
+            except Exception as e:
+                print(f"\nError saving recording: {e}")
+        
+        print('Finished.')

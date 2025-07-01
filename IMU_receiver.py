@@ -193,6 +193,7 @@ class IMUReceiver:
             'frequency': device_data.get('frequency', 0.0),
             'acceleration': latest_acceleration,
             'rotation_matrix': rotation_matrix.tolist(),
+            'quaternion': quaternion.tolist(), 
             'gyroscope': gyroscope,
             'is_calibrated': global_alignment_complete and device_calibrated,
             'is_reference': device_id == self.calibrator.reference_device
