@@ -56,9 +56,14 @@ class IMUReceiver:
     _instance = None
     
     def __init__(self, data_port=8001, api_port=9001):
+        # Original initialization code...
+
         # Current device orientations and raw data
         self.current_orientations = {}
         self.raw_device_data = {}
+        
+        # Add storage for transformed data for efficient access
+        self.transformed_data = {}
         
         # Public calibration flag - can be set by external applications
         self.calibration_requested = False
@@ -82,7 +87,8 @@ class IMUReceiver:
                 'reset_calibration': self.request_reset,
                 'select_reference_device': self._select_reference_device,
                 'calibrate_t_pose': self.calibrate_t_pose,
-                'get_t_pose_calibration': self.get_t_pose_calibration 
+                'get_t_pose_calibration': self.get_t_pose_calibration,
+                'test_tpose_transformation': self.test_tpose_transformation  
             }
         )
         
@@ -154,6 +160,65 @@ class IMUReceiver:
         if device_id not in self.current_orientations:
             return None
             
+        # Check if transformed data is available
+        if device_id in self.transformed_data:
+            transformed_data = self.transformed_data[device_id]
+            current_time = time.time()
+            
+            # Check if data is fresh (less than 2 seconds old)
+            if current_time - transformed_data['timestamp'] < 2.0:
+                # Get device visualization data for frequency calculation
+                device_data = self.visualizer.device_data.get(device_id)
+                frequency = device_data.get('frequency', 0.0) if device_data else 0.0
+                
+                # Get transformed data
+                quaternion = transformed_data['orientation']
+                
+                try:
+                    rotation_matrix = R.from_quat(quaternion).as_matrix()
+                except Exception as e:
+                    logger.warning(f"Error converting quaternion to matrix: {e}")
+                    rotation_matrix = np.eye(3)
+                    
+                latest_acceleration = transformed_data['acceleration']
+                
+                # Get gyroscope if available
+                gyroscope = transformed_data.get('gyroscope')
+                
+                # Check calibration status based on global alignment
+                global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
+                device_calibrated = device_id in self.calibrator.calibrated_devices
+                
+                # Helper function to convert NumPy values to standard Python values
+                def to_python_type(obj):
+                    if isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    elif isinstance(obj, np.float32) or isinstance(obj, np.float64):
+                        return float(obj)
+                    elif isinstance(obj, np.int32) or isinstance(obj, np.int64):
+                        return int(obj)
+                    elif isinstance(obj, list) or isinstance(obj, tuple):
+                        return [to_python_type(item) for item in obj]
+                    else:
+                        return obj
+                
+                # Convert all values to standard Python types
+                result = {
+                    'timestamp': to_python_type(transformed_data['timestamp']),
+                    'device_name': device_id,
+                    'frequency': to_python_type(frequency),
+                    'acceleration': to_python_type(latest_acceleration),
+                    'rotation_matrix': to_python_type(rotation_matrix),
+                    'quaternion': to_python_type(quaternion), 
+                    'gyroscope': to_python_type(gyroscope),
+                    'is_calibrated': bool(global_alignment_complete and device_calibrated),
+                    'is_reference': bool(device_id == self.calibrator.reference_device),
+                    'is_tpose_calibrated': bool(self.calibrator.is_fully_calibrated())
+                }
+                
+                return result
+        
+        # Fallback to original implementation if transformed data is not available
         device_data = self.visualizer.device_data.get(device_id)
         if not device_data:
             return None
@@ -211,7 +276,8 @@ class IMUReceiver:
             'quaternion': to_python_type(quaternion), 
             'gyroscope': to_python_type(gyroscope),
             'is_calibrated': bool(global_alignment_complete and device_calibrated),
-            'is_reference': bool(device_id == self.calibrator.reference_device)
+            'is_reference': bool(device_id == self.calibrator.reference_device),
+            'is_tpose_calibrated': bool(self.calibrator.is_fully_calibrated())
         }
         
         return result
@@ -322,7 +388,7 @@ class IMUReceiver:
 
     def calibrate_t_pose(self):
         """
-        Perform T-pose calibration for model inference
+        Perform T-pose calibration for model inference with improved transformation
         
         This is the second calibration step: T-Pose Alignment.
         
@@ -400,7 +466,7 @@ class IMUReceiver:
                 logger.info(f"T-POSE MEAN: {device_id} orientation: "
                         f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
                 logger.info(f"T-POSE MEAN: {device_id} quaternion: "
-                        f"[{mean_quat[0]:.3f}, {mean_quat[1]:.3f}, {mean_quat[2]:.3f}, {mean_quat[3]:.3f}]")
+                        f"[{mean_quat[0]:.6f}, {mean_quat[1]:.6f}, {mean_quat[2]:.6f}, {mean_quat[3]:.6f}]")
             except Exception as e:
                 logger.warning(f"Error calculating Euler angles for {device_id}: {e}")
         
@@ -412,13 +478,64 @@ class IMUReceiver:
             device_gyroscopes[device_id] = np.mean(np.array(gyros), axis=0)
             logger.info(f"T-POSE MEAN: {device_id} gyroscope: {device_gyroscopes[device_id].tolist()}")
         
-        # Call calibrate_t_pose from the calibrator
+        # Get the smpl2imu matrix for verification before calibration
+        smpl2imu = self.calibrator.global_alignment.get('smpl2imu')
+        if smpl2imu is not None:
+            logger.info("DEBUG: Global frame transformation matrix (smpl2imu) BEFORE T-pose:")
+            for row in range(smpl2imu.shape[0]):
+                row_str = " ".join([f"{val:.6f}" for val in smpl2imu[row]])
+                logger.info(f"    {row_str}")
+        
+        # Convert quaternions to rotation matrices for verification
+        logger.info("DEBUG: T-pose device orientations in global frame BEFORE calibration:")
+        for device_id, quat in device_orientations.items():
+            rot_matrix = R.from_quat(quat).as_matrix()
+            
+            # Convert to torch tensor for compatibility with smpl2imu
+            rot_tensor = torch.tensor(rot_matrix, dtype=torch.float32)
+            
+            # Calculate global orientation if smpl2imu is available
+            if smpl2imu is not None:
+                global_ori = smpl2imu.matmul(rot_tensor)
+                logger.info(f"DEBUG: {device_id} global orientation in T-pose:")
+                for row in range(global_ori.shape[0]):
+                    row_str = " ".join([f"{val:.6f}" for val in global_ori[row]])
+                    logger.info(f"    {row_str}")
+                
+                # Calculate what device2bone should be (inverse of global orientation)
+                try:
+                    expected_device2bone = torch.inverse(global_ori)
+                    logger.info(f"DEBUG: {device_id} expected device2bone (inverse of global_ori):")
+                    for row in range(expected_device2bone.shape[0]):
+                        row_str = " ".join([f"{val:.6f}" for val in expected_device2bone[row]])
+                        logger.info(f"    {row_str}")
+                    
+                    # Verify the result (should be identity)
+                    verification = global_ori.matmul(expected_device2bone)
+                    logger.info(f"DEBUG: {device_id} verification (global_ori * device2bone):")
+                    for row in range(verification.shape[0]):
+                        row_str = " ".join([f"{val:.6f}" for val in verification[row]])
+                        logger.info(f"    {row_str}")
+                    
+                    # Calculate identity error
+                    identity_error = torch.norm(verification - torch.eye(3))
+                    logger.info(f"DEBUG: {device_id} identity error: {identity_error:.10f}")
+                except Exception as e:
+                    logger.warning(f"Error calculating inverse: {e}")
+        
+        # Call calibrate_t_pose from the calibrator with the updated method
         result = self.calibrator.perform_tpose_alignment(device_orientations, device_accelerations, device_gyroscopes)
         
         # Log the calculated parameters
         if result:
             smpl2imu, device2bone, acc_offsets, gyro_offsets = result
             logger.info("T-pose calibration completed successfully with parameters:")
+            
+            # Log smpl2imu matrix after calibration
+            logger.info("DEBUG: Global frame transformation matrix (smpl2imu) AFTER T-pose:")
+            for row in range(smpl2imu.shape[0]):
+                row_str = " ".join([f"{val:.6f}" for val in smpl2imu[row]])
+                logger.info(f"    {row_str}")
             
             # Log device2bone matrices in more detail
             for device_id, matrix in device2bone.items():
@@ -427,17 +544,141 @@ class IMUReceiver:
                 try:
                     logger.info(f"TPOSE RESULT: {device_id} device2bone matrix:")
                     for row in range(matrix.shape[0]):
-                        row_values = [f"{val:.3f}" for val in matrix[row].tolist()]
+                        row_values = [f"{val:.6f}" for val in matrix[row].tolist()]
                         logger.info(f"    {' '.join(row_values)}")
                 except Exception as e:
                     logger.warning(f"Error formatting device2bone matrix for {device_id}: {e}")
+            
+            # Perform verification checks after calibration
+            logger.info("DEBUG: Performing post-calibration verification checks:")
+            for device_id, quat in device_orientations.items():
+                if device_id not in device2bone:
+                    continue
+                
+                # Create tensors from the SAME quaternions used for calibration
+                rot_matrix = R.from_quat(quat).as_matrix()
+                rot_tensor = torch.tensor(rot_matrix, dtype=torch.float32)
+                
+                # Calculate global orientation using the SAME smpl2imu from calibration
+                global_ori = smpl2imu.matmul(rot_tensor)
+                
+                # Apply device2bone to get final orientation
+                final_ori = global_ori.matmul(device2bone[device_id])
+                
+                # Log the final orientation
+                logger.info(f"DEBUG: {device_id} final orientation (global_ori * device2bone):")
+                for row in range(final_ori.shape[0]):
+                    row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
+                    logger.info(f"    {row_str}")
+                
+                # Calculate identity error
+                identity_error = torch.norm(final_ori - torch.eye(3))
+                logger.info(f"DEBUG: {device_id} final identity error: {identity_error:.10f}")
+                
+                # Check if the error is acceptable
+                if identity_error < 1e-5:
+                    logger.info(f"✅ {device_id} T-pose verification passed")
+                else:
+                    logger.warning(f"⚠️ {device_id} T-pose verification FAILED: error={identity_error:.10f}")
+                    
+                    # Detailed analysis of the error
+                    eigen_values, eigen_vectors = torch.linalg.eig(final_ori)
+                    logger.info(f"DEBUG: {device_id} eigenvalues of final orientation:")
+                    eigen_values_real = torch.real(eigen_values)
+                    eigen_values_imag = torch.imag(eigen_values)
+                    for i in range(eigen_values.shape[0]):
+                        logger.info(f"    λ{i+1} = {eigen_values_real[i]:.6f} + {eigen_values_imag[i]:.6f}j")
+                    
+                    # Euler angle decomposition
+                    try:
+                        euler = R.from_matrix(final_ori.detach().cpu().numpy()).as_euler('xyz', degrees=True)
+                        logger.info(f"DEBUG: {device_id} euler angles of final orientation: "
+                                f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                    except Exception as e:
+                        logger.warning(f"Error calculating Euler angles: {e}")
+        
+        # Clear transformed data to force recalculation with new calibration
+        self.transformed_data = {}
         
         return result
 
 
+    def test_tpose_transformation(self, device_id):
+        """
+        Test the T-pose transformation for a specific device to see if it works correctly.
+        
+        This function applies the transformation to the current device orientation and logs
+        how far it is from identity when the device is in T-pose.
+        
+        Args:
+            device_id: str - Device identifier to test
+            
+        Returns:
+            float - Identity error (norm of difference from identity matrix)
+        """
+        if not self.calibrator.is_fully_calibrated():
+            logger.warning("Cannot test T-pose transformation: System not fully calibrated")
+            return None
+        
+        if device_id not in self.current_orientations:
+            logger.warning(f"Cannot test T-pose transformation: Device {device_id} not found")
+            return None
+        
+        # Get current device orientation
+        current_quat = self.current_orientations[device_id]
+        
+        # Log current orientation
+        euler = calculate_euler_from_quaternion(current_quat)
+        logger.info(f"TEST T-POSE: {device_id} current orientation: "
+                f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+        
+        # Get calibration data
+        smpl2imu = self.calibrator.global_alignment.get('smpl2imu')
+        device2bone = self.calibrator.tpose_alignment.get('device2bone', {}).get(device_id)
+        
+        if smpl2imu is None or device2bone is None:
+            logger.warning(f"Cannot test T-pose transformation: Missing calibration data for {device_id}")
+            return None
+        
+        # Convert quaternion to rotation matrix
+        rot_matrix = R.from_quat(current_quat).as_matrix()
+        rot_tensor = torch.tensor(rot_matrix, dtype=torch.float32)
+        
+        # Calculate global orientation
+        global_ori = smpl2imu.matmul(rot_tensor)
+        
+        # Apply device2bone to get final orientation
+        final_ori = global_ori.matmul(device2bone)
+        
+        # Log the final orientation
+        logger.info(f"TEST T-POSE: {device_id} final orientation (global_ori * device2bone):")
+        for row in range(final_ori.shape[0]):
+            row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
+            logger.info(f"    {row_str}")
+        
+        # Calculate identity error
+        identity_error = torch.norm(final_ori - torch.eye(3)).item()
+        logger.info(f"TEST T-POSE: {device_id} identity error: {identity_error:.10f}")
+        
+        # Check if the error is acceptable
+        if identity_error < 1e-1:
+            logger.info(f"✅ {device_id} Current pose is close to T-pose (error={identity_error:.10f})")
+        else:
+            logger.info(f"ℹ️ {device_id} Current pose is not in T-pose (error={identity_error:.10f})")
+        
+        # Calculate what the current pose is relative to T-pose
+        try:
+            euler = R.from_matrix(final_ori.detach().cpu().numpy()).as_euler('xyz', degrees=True)
+            logger.info(f"TEST T-POSE: {device_id} deviation from T-pose: "
+                    f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+        except Exception as e:
+            logger.warning(f"Error calculating Euler angles: {e}")
+
+        return identity_error
+
     def _process_device_data(self, device_id, parsed_data, addr):
         """
-        Process parsed device data.
+        Process parsed device data with improved T-pose transformation.
         
         Args:
             device_id: str - Device identifier
@@ -533,7 +774,7 @@ class IMUReceiver:
                 
                 # Log global transformation result
                 euler = calculate_euler_from_quaternion(global_quat)
-                logger.info(f"GLOBAL TRANSFORM: {device_id} orientation: "
+                logger.debug(f"GLOBAL TRANSFORM: {device_id} orientation: "
                             f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
                 
                 # If T-pose calibration is complete, apply that transformation too
@@ -543,6 +784,9 @@ class IMUReceiver:
                         global_quat_tensor = torch.tensor(global_quat, dtype=torch.float32)
                         global_acc_tensor = torch.tensor(global_acc, dtype=torch.float32)
                         
+                        # Convert gyro to tensor if available
+                        global_gyro_tensor = torch.tensor(global_gyro, dtype=torch.float32) if global_gyro is not None else None
+                        
                         # Log pre-T-pose transformation
                         try:
                             euler = calculate_euler_from_quaternion(global_quat)
@@ -551,16 +795,16 @@ class IMUReceiver:
                         except Exception as e:
                             logger.debug(f"PRE-TPOSE: {device_id} logging error: {e}")
                         
-                        # Log shape information for debugging
-                        logger.debug(f"_process_device_data: {device_id} global_quat type: {type(global_quat)}, shape: {global_quat.shape if hasattr(global_quat, 'shape') else 'N/A'}")
-                        
-                        # Apply T-pose transformation
-                        transformed_ori, transformed_acc = self.calibrator.apply_tpose_transformation(
-                            device_id, global_quat_tensor, global_acc_tensor
-                        )
-                        
-                        # Log transformation result shapes
-                        logger.debug(f"_process_device_data: {device_id} transformed_ori type: {type(transformed_ori)}, shape: {transformed_ori.shape if hasattr(transformed_ori, 'shape') else 'N/A'}")
+                        # Apply T-pose transformation with updated method
+                        if global_gyro_tensor is not None:
+                            transformed_ori, transformed_acc, transformed_gyro = self.calibrator.apply_tpose_transformation(
+                                device_id, global_quat_tensor, global_acc_tensor, global_gyro_tensor
+                            )
+                        else:
+                            transformed_ori, transformed_acc = self.calibrator.apply_tpose_transformation(
+                                device_id, global_quat_tensor, global_acc_tensor
+                            )
+                            transformed_gyro = None
                         
                         # Convert rotation matrix back to quaternion for visualization
                         if isinstance(transformed_ori, torch.Tensor):
@@ -575,7 +819,7 @@ class IMUReceiver:
                                     
                                     # Log final orientation after T-pose transformation
                                     euler = r.as_euler('xyz', degrees=True)
-                                    logger.info(f"POST-TPOSE: {device_id} orientation: "
+                                    logger.debug(f"POST-TPOSE: {device_id} orientation: "
                                             f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
                                 elif transformed_ori.ndim > 2:
                                     # Batched rotation matrices - take first one for display
@@ -585,7 +829,7 @@ class IMUReceiver:
                                     
                                     # Log final orientation
                                     euler = r.as_euler('xyz', degrees=True)
-                                    logger.info(f"POST-TPOSE (from batch): {device_id} orientation: "
+                                    logger.debug(f"POST-TPOSE (from batch): {device_id} orientation: "
                                             f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
                                 else:
                                     # Unexpected shape - log and use original quaternion
@@ -613,15 +857,81 @@ class IMUReceiver:
                                 # More dimensions - take first element
                                 logger.debug(f"Complex transformed_acc shape: {transformed_acc.shape}")
                                 global_acc = transformed_acc.view(-1, 3)[0].cpu().numpy()
+                        
+                        # Convert transformed gyroscope to numpy if available
+                        if transformed_gyro is not None and isinstance(transformed_gyro, torch.Tensor):
+                            # Handle different dimensions
+                            if transformed_gyro.ndim == 1:
+                                # Single vector [3]
+                                global_gyro = transformed_gyro.cpu().numpy()
+                            elif transformed_gyro.ndim == 2:
+                                if transformed_gyro.shape[1] == 1:
+                                    # Column vector [3, 1]
+                                    global_gyro = transformed_gyro.squeeze(-1).cpu().numpy()
+                                else:
+                                    # Unexpected shape - log and use first row
+                                    logger.debug(f"Unexpected transformed_gyro shape: {transformed_gyro.shape}")
+                                    global_gyro = transformed_gyro[0].cpu().numpy()
+                            else:
+                                # More dimensions - take first element
+                                logger.debug(f"Complex transformed_gyro shape: {transformed_gyro.shape}")
+                                global_gyro = transformed_gyro.view(-1, 3)[0].cpu().numpy()
+                        
+                        # Store the transformed data for efficient access
+                        if device_id not in self.transformed_data:
+                            self.transformed_data[device_id] = {}
+                        
+                        # Update transformed data storage
+                        self.transformed_data[device_id] = {
+                            'orientation': global_quat,
+                            'acceleration': global_acc,
+                            'gyroscope': global_gyro if transformed_gyro is not None else None,
+                            'timestamp': timestamp
+                        }
+                        
                     except Exception as e:
                         logger.warning(f"Error applying T-pose transformation: {e}")
                         import traceback
                         logger.debug(traceback.format_exc())
+                        
+                        # Store the global transformed data as fallback
+                        if device_id not in self.transformed_data:
+                            self.transformed_data[device_id] = {}
+                        
+                        self.transformed_data[device_id] = {
+                            'orientation': global_quat,
+                            'acceleration': global_acc,
+                            'gyroscope': global_gyro,
+                            'timestamp': timestamp
+                        }
+                else:
+                    # Not fully calibrated - use global transformation results
+                    # Store the global transformed data
+                    if device_id not in self.transformed_data:
+                        self.transformed_data[device_id] = {}
+                    
+                    self.transformed_data[device_id] = {
+                        'orientation': global_quat,
+                        'acceleration': global_acc,
+                        'gyroscope': global_gyro,
+                        'timestamp': timestamp
+                    }
             else:
                 # Not calibrated - use as is
                 global_quat = quat_for_calibration
                 global_acc = accel_for_processing
                 global_gyro = gyro_for_processing
+                
+                # Store the raw data
+                if device_id not in self.transformed_data:
+                    self.transformed_data[device_id] = {}
+                
+                self.transformed_data[device_id] = {
+                    'orientation': global_quat,
+                    'acceleration': global_acc,
+                    'gyroscope': global_gyro,
+                    'timestamp': timestamp
+                }
             
             # Apply gravity compensation if enabled for glasses
             if self.visualizer.get_gravity_enabled() and device_id == 'glasses':
@@ -657,7 +967,8 @@ class IMUReceiver:
             logger.warning(f"Error processing {device_id} data: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-    
+
+
     def get_t_pose_calibration(self):
         """
         Get the current T-pose calibration data

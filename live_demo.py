@@ -348,6 +348,9 @@ if __name__ == '__main__':
             # Initialize empty tensors for the final input
             acc = torch.zeros(1, 5, 3, device=device)
             ori = torch.zeros(1, 5, 3, 3, device=device)
+
+            # _acc = glb_acc.view(-1, 5, 3)[:, [1, 4, 3, 0, 2]] / amass.acc_scale
+            # _ori = glb_ori.view(-1, 5, 3, 3)[:, [1, 4, 3, 0, 2]]
             
             # Device combo - we'll use 'lw_h' which corresponds to [0, 4] after our mapping
             combo = 'lw_h'  # left wrist and head

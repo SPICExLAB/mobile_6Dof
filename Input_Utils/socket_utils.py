@@ -132,6 +132,11 @@ class ApiServer:
                        - 'get_device_data': function(device_id) -> dict
                        - 'get_active_devices': function() -> list
                        - 'calibrate': function() -> bool
+                       - 'reset_calibration': function() -> bool
+                       - 'select_reference_device': function(device_id) -> bool
+                       - 'calibrate_t_pose': function() -> tuple
+                       - 'get_t_pose_calibration': function() -> tuple
+                       - 'test_tpose_transformation': function(device_id) -> float
         """
         self.host = host
         self.port = port
@@ -193,38 +198,54 @@ class ApiServer:
     def _handle_request(self, request):
         """Handle API requests and return JSON responses"""
         try:
-            # print(f"Received API request: {request}")
-
-            if request == "get_all_devices":
+            # Check if request contains parameters
+            if ':' in request:
+                command, params = request.split(':', 1)
+            else:
+                command = request
+                params = None
+            
+            if command == "get_all_devices":
                 devices = {}
                 active_devices = self.callbacks.get('get_active_devices', lambda: [])()
-                # print(active_devices)
                 for device_id in active_devices:
                     device_data = self.callbacks.get('get_device_data', lambda x: None)(device_id)
                     
                     if device_data:
                         devices[device_id] = device_data
-                        # print(devices[device_id])
                 return json.dumps(devices)
                 
-            elif request.startswith("get_device:"):
-                device_id = request.split(":", 1)[1]
+            elif command == "get_device":
+                if not params:
+                    return json.dumps({"error": "No device ID provided"})
+                device_id = params
                 device_data = self.callbacks.get('get_device_data', lambda x: None)(device_id)
                 return json.dumps(device_data) if device_data else json.dumps(None)
                 
-            elif request == "get_active_devices":
+            elif command == "get_active_devices":
                 active = self.callbacks.get('get_active_devices', lambda: [])()
                 return json.dumps(active)
                 
-            elif request == "calibrate":
+            elif command == "calibrate":
                 result = self.callbacks.get('calibrate', lambda: False)()
                 return json.dumps({"status": "calibration_requested", "success": result})
             
-            elif request == "calibrate_t_pose":
+            elif command == "reset_calibration":
+                result = self.callbacks.get('reset_calibration', lambda: False)()
+                return json.dumps({"status": "reset_calibration_requested", "success": result})
+            
+            elif command == "select_reference_device":
+                if not params:
+                    return json.dumps({"error": "No device ID provided"})
+                device_id = params
+                result = self.callbacks.get('select_reference_device', lambda x: False)(device_id)
+                return json.dumps({"status": "reference_device_selected", "success": result})
+            
+            elif command == "calibrate_t_pose":
                 result = self.callbacks.get('calibrate_t_pose', lambda: None)()
                 return json.dumps({"status": "t_pose_calibration_requested", "success": result is not None})
                 
-            elif request == "get_t_pose_calibration":
+            elif command == "get_t_pose_calibration":
                 t_pose_data = self.callbacks.get('get_t_pose_calibration', lambda: None)()
               
                 if t_pose_data:
@@ -243,7 +264,22 @@ class ApiServer:
                 else:
                     return json.dumps({"error": "T-pose calibration data not available"})
             
-            elif request == "ping":
+            elif command == "test_tpose_transformation":
+                if not params:
+                    return json.dumps({"error": "No device ID provided"})
+                device_id = params
+                result = self.callbacks.get('test_tpose_transformation', lambda x: None)(device_id)
+                if result is not None:
+                    return json.dumps({
+                        "status": "success", 
+                        "device_id": device_id,
+                        "identity_error": result,
+                        "is_tpose": result < 0.1  # Consider it in T-pose if error is less than 0.1
+                    })
+                else:
+                    return json.dumps({"error": "Could not test T-pose transformation"})
+            
+            elif command == "ping":
                 return json.dumps({"status": "ok", "timestamp": time.time()})
                 
         except Exception as e:
