@@ -370,17 +370,24 @@ class IMUReceiver:
                     
                     # Apply global transformation and log result
                     try:
-                        transformed_quat = self.calibrator.apply_global_transformation(
-                            device_id, 
-                            quaternion
-                        )
-                            
-                        display_euler = calculate_euler_from_quaternion(transformed_quat)
+                        if device_id == ref_device:
+                            # For reference device, transformed orientation should be identity
+                            # This represents global coordinate frame
+                            display_euler = np.array([0, 0, 0])
+                        else:
+                            # For other devices, apply relative transformation
+                            transformed_quat = self.calibrator.apply_global_transformation(
+                                device_id, 
+                                quaternion
+                            )
+                                
+                            display_euler = calculate_euler_from_quaternion(transformed_quat)
+                        
                         logger.info(f"TRANSFORMED ORIENTATION: {device_id}: "
                                 f"Roll={display_euler[0]:.1f}°, Pitch={display_euler[1]:.1f}°, Yaw={display_euler[2]:.1f}°")
                     except Exception as e:
                         logger.warning(f"Could not calculate transformed orientation: {e}")
-                        
+                            
             except Exception as e:
                 logger.warning(f"Could not log orientation for {device_id}: {e}")
         
@@ -525,7 +532,7 @@ class IMUReceiver:
         
         # Call calibrate_t_pose from the calibrator with the updated method
         result = self.calibrator.perform_tpose_alignment(device_orientations, device_accelerations, device_gyroscopes)
-        
+    
         # Log the calculated parameters
         if result:
             smpl2imu, device2bone, acc_offsets, gyro_offsets = result
@@ -549,58 +556,118 @@ class IMUReceiver:
                 except Exception as e:
                     logger.warning(f"Error formatting device2bone matrix for {device_id}: {e}")
             
-            # Perform verification checks after calibration
+            # Perform verification checks after calibration using the stored original rotations
             logger.info("DEBUG: Performing post-calibration verification checks:")
-            for device_id, quat in device_orientations.items():
-                if device_id not in device2bone:
-                    continue
-                
-                # Create tensors from the SAME quaternions used for calibration
-                rot_matrix = R.from_quat(quat).as_matrix()
-                rot_tensor = torch.tensor(rot_matrix, dtype=torch.float32)
-                
-                # Calculate global orientation using the SAME smpl2imu from calibration
-                global_ori = smpl2imu.matmul(rot_tensor)
-                
-                # Apply device2bone to get final orientation
-                final_ori = global_ori.matmul(device2bone[device_id])
-                
-                # Log the final orientation
-                logger.info(f"DEBUG: {device_id} final orientation (global_ori * device2bone):")
-                for row in range(final_ori.shape[0]):
-                    row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
-                    logger.info(f"    {row_str}")
-                
-                # Calculate identity error
-                identity_error = torch.norm(final_ori - torch.eye(3))
-                logger.info(f"DEBUG: {device_id} final identity error: {identity_error:.10f}")
-                
-                # Check if the error is acceptable
-                if identity_error < 1e-5:
-                    logger.info(f"✅ {device_id} T-pose verification passed")
-                else:
-                    logger.warning(f"⚠️ {device_id} T-pose verification FAILED: error={identity_error:.10f}")
+            
+            # Get stored data from the calibrator for verification
+            original_rotations = self.calibrator.tpose_alignment.get('original_rotations', {})
+            global_orientations = self.calibrator.tpose_alignment.get('global_orientations', {})
+            
+            # If we have stored global orientations, use them for verification
+            if global_orientations:
+                for device_id, global_ori in global_orientations.items():
+                    if device_id not in device2bone:
+                        continue
                     
-                    # Detailed analysis of the error
-                    eigen_values, eigen_vectors = torch.linalg.eig(final_ori)
-                    logger.info(f"DEBUG: {device_id} eigenvalues of final orientation:")
-                    eigen_values_real = torch.real(eigen_values)
-                    eigen_values_imag = torch.imag(eigen_values)
-                    for i in range(eigen_values.shape[0]):
-                        logger.info(f"    λ{i+1} = {eigen_values_real[i]:.6f} + {eigen_values_imag[i]:.6f}j")
+                    # Apply device2bone to get final orientation using stored global orientation
+                    final_ori = global_ori.matmul(device2bone[device_id])
                     
-                    # Euler angle decomposition
-                    try:
-                        euler = R.from_matrix(final_ori.detach().cpu().numpy()).as_euler('xyz', degrees=True)
-                        logger.info(f"DEBUG: {device_id} euler angles of final orientation: "
-                                f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
-                    except Exception as e:
-                        logger.warning(f"Error calculating Euler angles: {e}")
-        
-        # Clear transformed data to force recalculation with new calibration
-        self.transformed_data = {}
-        
-        return result
+                    # Log the final orientation
+                    logger.info(f"DEBUG: {device_id} final orientation (global_ori * device2bone):")
+                    for row in range(final_ori.shape[0]):
+                        row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
+                        logger.info(f"    {row_str}")
+                    
+                    # Calculate identity error
+                    identity_error = torch.norm(final_ori - torch.eye(3))
+                    logger.info(f"DEBUG: {device_id} final identity error: {identity_error:.10f}")
+                    
+                    # Check if the error is acceptable
+                    if identity_error < 1e-5:
+                        logger.info(f"✅ {device_id} T-pose verification passed")
+                    else:
+                        logger.warning(f"⚠️ {device_id} T-pose verification FAILED: error={identity_error:.10f}")
+                        
+                        # Detailed analysis of the error
+                        eigen_values, eigen_vectors = torch.linalg.eig(final_ori)
+                        logger.info(f"DEBUG: {device_id} eigenvalues of final orientation:")
+                        eigen_values_real = torch.real(eigen_values)
+                        eigen_values_imag = torch.imag(eigen_values)
+                        for i in range(eigen_values.shape[0]):
+                            logger.info(f"    λ{i+1} = {eigen_values_real[i]:.6f} + {eigen_values_imag[i]:.6f}j")
+                        
+                        # Euler angle decomposition
+                        try:
+                            euler = R.from_matrix(final_ori.detach().cpu().numpy()).as_euler('xyz', degrees=True)
+                            logger.info(f"DEBUG: {device_id} euler angles of final orientation: "
+                                    f"Roll={float(euler[0]):.1f}°, Pitch={float(euler[1]):.1f}°, Yaw={float(euler[2]):.1f}°")
+                        except Exception as e:
+                            logger.warning(f"Error calculating Euler angles: {e}")
+            # Fall back to verification with original rotation matrices
+            elif original_rotations:
+                for device_id, rot_matrix in original_rotations.items():
+                    if device_id not in device2bone:
+                        continue
+                    
+                    # Calculate global orientation using the original rotation matrix
+                    global_ori = smpl2imu.matmul(rot_matrix)
+                    
+                    # Apply device2bone to get final orientation
+                    final_ori = global_ori.matmul(device2bone[device_id])
+                    
+                    # Log the final orientation
+                    logger.info(f"DEBUG: {device_id} final orientation (global_ori * device2bone):")
+                    for row in range(final_ori.shape[0]):
+                        row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
+                        logger.info(f"    {row_str}")
+                    
+                    # Calculate identity error
+                    identity_error = torch.norm(final_ori - torch.eye(3))
+                    logger.info(f"DEBUG: {device_id} final identity error: {identity_error:.10f}")
+                    
+                    # Check if the error is acceptable
+                    if identity_error < 1e-5:
+                        logger.info(f"✅ {device_id} T-pose verification passed")
+                    else:
+                        logger.warning(f"⚠️ {device_id} T-pose verification FAILED: error={identity_error:.10f}")
+            # If no stored data, use the original quaternions (which may have changed)
+            else:
+                for device_id, quat in device_orientations.items():
+                    if device_id not in device2bone:
+                        continue
+                    
+                    # Create tensors from the quaternions
+                    rot_matrix = R.from_quat(quat).as_matrix()
+                    rot_tensor = torch.tensor(rot_matrix, dtype=torch.float32)
+                    
+                    # Calculate global orientation
+                    global_ori = smpl2imu.matmul(rot_tensor)
+                    
+                    # Apply device2bone to get final orientation
+                    final_ori = global_ori.matmul(device2bone[device_id])
+                    
+                    # Log the final orientation
+                    logger.info(f"DEBUG: {device_id} final orientation (global_ori * device2bone):")
+                    for row in range(final_ori.shape[0]):
+                        row_str = " ".join([f"{val:.6f}" for val in final_ori[row]])
+                        logger.info(f"    {row_str}")
+                    
+                    # Calculate identity error
+                    identity_error = torch.norm(final_ori - torch.eye(3))
+                    logger.info(f"DEBUG: {device_id} final identity error: {identity_error:.10f}")
+                    
+                    # Check if the error is acceptable
+                    if identity_error < 1e-5:
+                        logger.info(f"✅ {device_id} T-pose verification passed")
+                    else:
+                        logger.warning(f"⚠️ {device_id} T-pose verification FAILED: error={identity_error:.10f}")
+            
+            # Clear transformed data to force recalculation with new calibration
+            self.transformed_data = {}
+            
+            return result
+        else:
+            return None
 
 
     def test_tpose_transformation(self, device_id):
@@ -737,27 +804,17 @@ class IMUReceiver:
                 
                 # Store the original quaternion for calibration
                 self.current_orientations[device_id] = device_quat
-                
-                # Log current raw orientation periodically (every 30 frames)
-                if device_id in self.raw_device_data and 'frame_counter' in self.raw_device_data[device_id]:
-                    frame_counter = self.raw_device_data[device_id]['frame_counter'] + 1
-                    self.raw_device_data[device_id]['frame_counter'] = frame_counter
-                    
-                    if frame_counter % 30 == 0:
-                        euler = calculate_euler_from_quaternion(device_quat)
-                        logger.debug(f"RAW: {device_id} orientation: "
-                                f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
-                else:
-                    # Initialize frame counter
-                    self.raw_device_data[device_id]['frame_counter'] = 0
             
             # Apply calibration transformation if device is calibrated
             global_alignment_complete = self.calibrator.global_alignment.get('smpl2imu') is not None
             device_calibrated = device_id in self.calibrator.calibrated_devices
+            is_reference = device_id == self.calibrator.reference_device
 
             if global_alignment_complete and device_calibrated:
                 # Apply global transformation with gyroscope
                 if gyro_for_processing is not None:
+                    # For reference device, this should now give identity quaternion
+                    # For other devices, this applies their relative transformation
                     global_quat, global_acc, global_gyro = self.calibrator.apply_global_transformation(
                         device_id, 
                         quat_for_calibration, 
@@ -776,6 +833,7 @@ class IMUReceiver:
                 euler = calculate_euler_from_quaternion(global_quat)
                 logger.debug(f"GLOBAL TRANSFORM: {device_id} orientation: "
                             f"Roll={euler[0]:.1f}°, Pitch={euler[1]:.1f}°, Yaw={euler[2]:.1f}°")
+                
                 
                 # If T-pose calibration is complete, apply that transformation too
                 if self.calibrator.is_fully_calibrated():

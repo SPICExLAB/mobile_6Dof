@@ -105,7 +105,7 @@ class IMUCalibrator:
         # Log initial reference device orientation
         ref_euler_initial = ref_rotation.as_euler('xyz', degrees=True)
         logger.info(f"REFERENCE: {reference_device} orientation: "
-                   f"X={ref_euler_initial[0]:.1f}°, Y={ref_euler_initial[1]:.1f}°, Z={ref_euler_initial[2]:.1f}°")
+                f"X={ref_euler_initial[0]:.1f}°, Y={ref_euler_initial[1]:.1f}°, Z={ref_euler_initial[2]:.1f}°")
         logger.info(f"Global alignment transformation calculated")
         
         # DEBUG: Print smpl2imu in detail
@@ -122,21 +122,18 @@ class IMUCalibrator:
             curr_rotation = R.from_quat(curr_quat)
             
             if device_id == reference_device:
-                # For reference device, we use its current orientation as the reference
-                device_orientations[device_id] = ref_quat
+                # For reference device, we use identity quaternion
+                device_orientations[device_id] = np.array([0, 0, 0, 1])  # Identity quaternion
+                logger.info(f"DEBUG: {device_id} (reference device) - identity relative transformation")
             else:
                 # For other devices, calculate the relative rotation to the reference device
                 relative_rotation = ref_rotation.inv() * curr_rotation
                 device_orientations[device_id] = relative_rotation.as_quat()
-            
-            # DEBUG: Print the transformation details
-            if device_id == reference_device:
-                logger.info(f"DEBUG: {device_id} (reference device) - identity relative transformation")
-            else:
-                rel_rot = R.from_quat(device_orientations[device_id])
-                rel_euler = rel_rot.as_euler('xyz', degrees=True)
+                
+                # Log the relative orientation
+                rel_euler = relative_rotation.as_euler('xyz', degrees=True)
                 logger.info(f"DEBUG: {device_id} relative to reference: "
-                      f"X={rel_euler[0]:.1f}°, Y={rel_euler[1]:.1f}°, Z={rel_euler[2]:.1f}°")
+                    f"X={rel_euler[0]:.1f}°, Y={rel_euler[1]:.1f}°, Z={rel_euler[2]:.1f}°")
         
         # Store calibration results
         self.device_orientations = device_orientations
@@ -149,7 +146,7 @@ class IMUCalibrator:
             try:
                 calib_euler = R.from_quat(quat).as_euler('xyz', degrees=True)
                 logger.info(f"CALIBRATED: {device_id} orientation: "
-                          f"X={calib_euler[0]:.1f}°, Y={calib_euler[1]:.1f}°, Z={calib_euler[2]:.1f}°")
+                        f"X={calib_euler[0]:.1f}°, Y={calib_euler[1]:.1f}°, Z={calib_euler[2]:.1f}°")
             except Exception as e:
                 logger.info(f"CALIBRATED: {device_id} quaternion: [{quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}]")
                 logger.warning(f"Error calculating Euler angles: {e}")
@@ -188,11 +185,12 @@ class IMUCalibrator:
         calib_rot = R.from_quat(device_calib_quat)
         
         # Apply calibration to orientation
-        # This shows the device's movement relative to its calibration position
+        # For reference device, this should result in identity
+        # For other devices, this applies their relative transformation
         transformed_rot = calib_rot.inv() * device_rot
         transformed_quat = transformed_rot.as_quat()
         
-        # DEBUG: Log transformation details for every 30th frame
+        # DEBUG: Log transformation details periodically
         if hasattr(self, '_frame_counter'):
             self._frame_counter = (self._frame_counter + 1) % 30
         else:
@@ -206,11 +204,11 @@ class IMUCalibrator:
                 transformed_euler = transformed_rot.as_euler('xyz', degrees=True)
                 
                 logger.debug(f"GLOBAL TRANSFORM: {device_id} original: "
-                         f"X={orig_euler[0]:.1f}°, Y={orig_euler[1]:.1f}°, Z={orig_euler[2]:.1f}°")
+                        f"X={orig_euler[0]:.1f}°, Y={orig_euler[1]:.1f}°, Z={orig_euler[2]:.1f}°")
                 logger.debug(f"GLOBAL TRANSFORM: {device_id} calibration: "
-                         f"X={calib_euler[0]:.1f}°, Y={calib_euler[1]:.1f}°, Z={calib_euler[2]:.1f}°")
+                        f"X={calib_euler[0]:.1f}°, Y={calib_euler[1]:.1f}°, Z={calib_euler[2]:.1f}°")
                 logger.debug(f"GLOBAL TRANSFORM: {device_id} transformed: "
-                         f"X={transformed_euler[0]:.1f}°, Y={transformed_euler[1]:.1f}°, Z={transformed_euler[2]:.1f}°")
+                        f"X={transformed_euler[0]:.1f}°, Y={transformed_euler[1]:.1f}°, Z={transformed_euler[2]:.1f}°")
             except Exception as e:
                 logger.debug(f"GLOBAL TRANSFORM: {device_id} logging error: {e}")
         
@@ -236,7 +234,8 @@ class IMUCalibrator:
             return transformed_quat, transformed_acc
         else:
             return transformed_quat
-    
+
+
     #
     # Step 2: T-Pose Alignment
     #
@@ -323,6 +322,10 @@ class IMUCalibrator:
         # Create device to bone transformations - optimized for batch processing
         device2bone = {}
         
+        # Store original rotation matrices and global orientations for verification
+        original_rotations = {}
+        global_orientations = {}
+        
         # DEBUG: Add detailed logging to understand each step
         logger.info("DEBUG: T-POSE TRANSFORMATION CALCULATION STEPS:")
         
@@ -340,6 +343,9 @@ class IMUCalibrator:
                 # Already batched
                 rot_matrix = quaternion_to_rotation_matrix(quat)
             
+            # Store original rotation for verification
+            original_rotations[device_id] = rot_matrix.clone()
+            
             # DEBUG: Log t-pose orientation matrix
             logger.info(f"DEBUG: {device_id} T-POSE orientation matrix:")
             for row in range(rot_matrix.shape[0]):
@@ -354,6 +360,9 @@ class IMUCalibrator:
             
             # Calculate global t-pose orientation
             global_ori = smpl2imu.matmul(rot_matrix)
+            
+            # Store global orientation for verification
+            global_orientations[device_id] = global_ori.clone()
             
             # DEBUG: Log global t-pose orientation
             logger.info(f"DEBUG: {device_id} GLOBAL T-POSE orientation (smpl2imu * rot_matrix):")
@@ -458,8 +467,30 @@ class IMUCalibrator:
         self.tpose_alignment = {
             'device2bone': device2bone,
             'acc_offsets': acc_offsets,
-            'gyro_offsets': gyro_offsets
+            'gyro_offsets': gyro_offsets,
+            'original_rotations': original_rotations,  # Store for verification
+            'global_orientations': global_orientations  # Store for verification
         }
+        
+        # Re-verify after storing results
+        logger.info("DEBUG: Re-verifying T-pose transformation with stored matrices:")
+        for device_id in device_orientations.keys():
+            if device_id not in device2bone or device_id not in global_orientations:
+                continue
+            
+            # Get stored global orientation
+            global_ori = global_orientations[device_id]
+            
+            # Verify with stored device2bone
+            verification_result = global_ori.matmul(device2bone[device_id])
+            logger.info(f"FINAL VERIFY: {device_id} final orientation (global_ori * device2bone):")
+            for row in range(verification_result.shape[0]):
+                row_str = " ".join([f"{val:.6f}" for val in verification_result[row]])
+                logger.info(f"    {row_str}")
+            
+            # Calculate identity error
+            identity_error = torch.norm(verification_result - torch.eye(3))
+            logger.info(f"FINAL VERIFY: {device_id} identity error: {identity_error:.10f}")
         
         logger.info("T-pose alignment completed successfully")
         return smpl2imu, device2bone, acc_offsets, gyro_offsets

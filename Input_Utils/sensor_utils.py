@@ -53,13 +53,13 @@ def preprocess_phone_watch_data(quaternion, acceleration, gyroscope=None):
     # Apply transformation to get rotation in world frame
     world_rotation = align_transform * device_rotation * align_transform.inv()
     
-    # Extract Euler angles to correct rotation directions
-    euler = world_rotation.as_euler('xyz', degrees=True)
-    euler[0] = -euler[0]
-    euler[1] = -euler[1]
+    # # Extract Euler angles to correct rotation directions
+    # euler = world_rotation.as_euler('xyz', degrees=True)
+    # euler[0] = -euler[0]
+    # euler[1] = -euler[1]
     
-    # Create new rotation from adjusted euler angles
-    world_rotation = R.from_euler('xyz', euler, degrees=True)
+    # # Create new rotation from adjusted euler angles
+    # world_rotation = R.from_euler('xyz', euler, degrees=True)
     world_quaternion = world_rotation.as_quat()
     
     # Transform acceleration to world frame
@@ -106,13 +106,13 @@ def preprocess_headphone_data(quaternion, acceleration, gyroscope=None):
     # Instead of align * device * align.inv(), use a different composition:
     world_rotation = align_transform * device_rotation * align_transform.inv()
     
-    # Checking if we need to invert specific rotations
-    euler = world_rotation.as_euler('xyz', degrees=True)
-    euler[0] = -euler[0]
-    euler[1] = -euler[1]
+    # # Checking if we need to invert specific rotations
+    # euler = world_rotation.as_euler('xyz', degrees=True)
+    # euler[0] = -euler[0]
+    # euler[1] = -euler[1]
 
-    # Create new rotation from adjusted euler angles
-    world_rotation = R.from_euler('xyz', euler, degrees=True)
+    # # Create new rotation from adjusted euler angles
+    # world_rotation = R.from_euler('xyz', euler, degrees=True)
     world_quaternion = world_rotation.as_quat()
     
     # Transform acceleration consistently

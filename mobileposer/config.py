@@ -75,7 +75,7 @@ class amass:
     acc_scale = 30
     vel_scale = 2
 
-    # left wrist, right wrist, left thigh, right thigh, head, pelvis
+    # left wrist, right wrist, left thigh, right thigh, head,
     all_imu_ids = [0, 1, 2, 3, 4] 
     imu_ids = [0, 1, 2, 3]
 
