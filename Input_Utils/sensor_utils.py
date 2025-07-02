@@ -45,9 +45,9 @@ def preprocess_phone_watch_data(quaternion, acceleration, gyroscope=None):
     # Define the transformation that aligns coordinate systems
     # Phone/Watch (X:right, Y:up, Z:toward) → World (X:left, Y:up, Z:forward)
     align_transform = R.from_matrix([
-        [-1, 0, 0],   # X: right → left
+        [1, 0, 0],   # X: right → left
         [0, 1, 0],    # Y: up → up
-        [0, 0, -1]    # Z: toward → forward (negate)
+        [0, 0, 1]    # Z: toward → forward (negate)
     ])
     
     # Apply transformation to get rotation in world frame
@@ -64,9 +64,9 @@ def preprocess_phone_watch_data(quaternion, acceleration, gyroscope=None):
     
     # Transform acceleration to world frame
     world_acceleration = np.array([
-        -acceleration[0],  # X: right → left
+        acceleration[0],  # X: right → left
         acceleration[1],   # Y: up → up
-        -acceleration[2]   # Z: toward → forward (negate)
+        acceleration[2]   # Z: toward → forward (negate)
     ])
     
     # Transform gyroscope to world frame if provided
@@ -105,14 +105,7 @@ def preprocess_headphone_data(quaternion, acceleration, gyroscope=None):
     # NOTE: Ensure we're correctly handling the rotation direction
     # Instead of align * device * align.inv(), use a different composition:
     world_rotation = align_transform * device_rotation * align_transform.inv()
-    
-    # # Checking if we need to invert specific rotations
-    # euler = world_rotation.as_euler('xyz', degrees=True)
-    # euler[0] = -euler[0]
-    # euler[1] = -euler[1]
-
-    # # Create new rotation from adjusted euler angles
-    # world_rotation = R.from_euler('xyz', euler, degrees=True)
+   
     world_quaternion = world_rotation.as_quat()
     
     # Transform acceleration consistently

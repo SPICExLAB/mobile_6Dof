@@ -181,6 +181,7 @@ if __name__ == '__main__':
     # oris = imu_set.get_mean_measurement_of_n_second(num_seconds=3, buffer_len=40)[0][0]
     oris = imu_set.get_mean_measurement_of_n_second(num_seconds=3, buffer_len=40)[0][1]
     smpl2imu = quaternion_to_rotation_matrix(oris).view(3, 3).t()
+    print('smpl2imu', smpl2imu)
 
     # bone and acceleration offset calibration
     input('\tFinish.\nWear all imus correctly and press any key.')
@@ -192,6 +193,7 @@ if __name__ == '__main__':
     oris, accs = imu_set.get_mean_measurement_of_n_second(num_seconds=3, buffer_len=40)
     oris = quaternion_to_rotation_matrix(oris)
     device2bone = smpl2imu.matmul(oris).transpose(1, 2).matmul(torch.eye(3))
+    print('device2bone', device2bone)
     acc_offsets = smpl2imu.matmul(accs.unsqueeze(-1))   # [num_imus, 3, 1], already in global inertial frame
 
     # start streaming data

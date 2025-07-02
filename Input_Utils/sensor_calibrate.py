@@ -242,11 +242,10 @@ class IMUCalibrator:
     
     def perform_tpose_alignment(self, device_orientations, device_accelerations=None, device_gyroscopes=None):
         """
-        Perform T-pose alignment for model inference.
+        Perform T-pose alignment for model inference with MobilePoseR-compatible approach.
         
         This is the second calibration step: T-Pose Alignment.
-        With the new approach, we calculate transformations that ensure device 
-        orientations in T-pose map to identity matrices.
+        Modified to exactly match MobilePoseR's device2bone calculation.
         
         Args:
             device_orientations: dict - Device orientations during T-pose {device_id: quaternion}
@@ -370,22 +369,14 @@ class IMUCalibrator:
                 row_str = " ".join([f"{val:.6f}" for val in global_ori[row]])
                 logger.info(f"    {row_str}")
             
-            # NEW APPROACH: Calculate device2bone as the inverse of global orientation
-            # This ensures that global_ori.matmul(device2bone) = identity
-            try:
-                # Use torch.inverse for better numerical stability
-                device2bone[device_id] = torch.inverse(global_ori)
-                
-                # DEBUG: Log the inverse calculation
-                logger.info(f"DEBUG: {device_id} device2bone (inverse of global_ori):")
-                for row in range(device2bone[device_id].shape[0]):
-                    row_str = " ".join([f"{val:.6f}" for val in device2bone[device_id][row]])
-                    logger.info(f"    {row_str}")
-            except Exception as e:
-                logger.error(f"Error computing inverse for {device_id}: {e}")
-                # Fallback to transpose if inverse fails (should only happen if matrix is singular)
-                logger.warning(f"Falling back to transpose for {device_id}")
-                device2bone[device_id] = global_ori.transpose(0, 1)
+            # Calculate device2bone EXACTLY like MobilePoseR does
+            device2bone[device_id] = global_ori.transpose(0, 1)
+            
+            # DEBUG: Log the device2bone matrix
+            logger.info(f"DEBUG: {device_id} device2bone (calculated like MobilePoseR):")
+            for row in range(device2bone[device_id].shape[0]):
+                row_str = " ".join([f"{val:.6f}" for val in device2bone[device_id][row]])
+                logger.info(f"    {row_str}")
             
             # Verify the result by checking if applying this transformation to the T-pose orientation yields identity
             verification_result = global_ori.matmul(device2bone[device_id])
@@ -397,12 +388,6 @@ class IMUCalibrator:
             # Calculate how close to identity the verification result is
             identity_error = torch.norm(verification_result - torch.eye(3))
             logger.info(f"DEBUG: {device_id} VERIFICATION error (deviation from identity): {identity_error:.10f}")
-            
-            # Log the final device2bone matrix for debugging
-            logger.info(f"DEVICE2BONE: {device_id} final transformation matrix:")
-            for row in range(device2bone[device_id].shape[0]):
-                row_str = " ".join([f"{val:.6f}" for val in device2bone[device_id][row]])
-                logger.info(f"    {row_str}")
         
         # Process accelerations - Create acceleration offsets (including gravity)
         acc_offsets = {}
@@ -495,6 +480,7 @@ class IMUCalibrator:
         logger.info("T-pose alignment completed successfully")
         return smpl2imu, device2bone, acc_offsets, gyro_offsets
     
+
     def apply_tpose_transformation(self, device_id, quaternion, acceleration, gyroscope=None, smpl2imu=None, device2bone=None, acc_offsets=None, gyro_offsets=None):
         """
         Apply T-pose transformation to pre-processed data.
